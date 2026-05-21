@@ -1,0 +1,444 @@
+import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+    ArrowLeft,
+    CheckCircle2,
+    XCircle,
+    Loader2,
+    MapPin,
+    QrCode,
+    ShieldCheck,
+    Navigation
+} from "lucide-react";
+import api from "../../api/axiosClient";
+import QRScanner from "../components/QRScanner";
+import DeviceBindingOTPModal from "../../components/DeviceBindingOtpModal";
+import { authenticateDevice } from "../../api/webauthn";
+// import { toast } from "react-hot-toast";
+
+export default function MarkWithQR() {
+    const navigate = useNavigate();
+    const [showScanner, setShowScanner] = useState(false);
+    const [status, setStatus] = useState("idle"); // idle, scanning, geolocating, submitting, success, error, verifying_bio
+    const [errorMsg, setErrorMsg] = useState("");
+    const [showDeviceBindingModal, setShowDeviceBindingModal] = useState(false);
+    const [userEmail, setUserEmail] = useState("");
+    const [pendingAttendanceData, setPendingAttendanceData] = useState(null);
+
+    // Device binding state validity: 5 minutes in milliseconds
+    const DEVICE_BINDING_STATE_VALIDITY_MS = 5 * 60 * 1000;
+
+    // Check if device binding is required on mount
+    useEffect(() => {
+        const deviceBindingState = sessionStorage.getItem("deviceBindingRequired");
+        if (deviceBindingState) {
+            const { timestamp } = JSON.parse(deviceBindingState);
+            // Show modal if the error was recent (within last 5 minutes)
+            if (Date.now() - timestamp < DEVICE_BINDING_STATE_VALIDITY_MS) {
+                const user = JSON.parse(localStorage.getItem("user") || "{}");
+                setUserEmail(user.email || "");
+                setShowDeviceBindingModal(true);
+            }
+        }
+    }, [DEVICE_BINDING_STATE_VALIDITY_MS]);
+
+    const startScanning = () => {
+        if (!navigator.geolocation) {
+            setStatus("error");
+            setErrorMsg("Geolocation is not supported by your browser.");
+            return;
+        }
+        
+        // Request location permission upfront
+        setStatus("geolocating");
+        navigator.geolocation.getCurrentPosition(
+            () => {
+                // Permission granted and location found
+                setStatus("scanning");
+                setShowScanner(true);
+                setErrorMsg("");
+            },
+            (error) => {
+                setStatus("error");
+                switch (error.code) {
+                    case error.PERMISSION_DENIED:
+                        setErrorMsg("Location access is required to verify you are in class.");
+                        break;
+                    case error.POSITION_UNAVAILABLE:
+                        setErrorMsg("Location information is unavailable. Please try again.");
+                        break;
+                    case error.TIMEOUT:
+                        setErrorMsg("Location request timed out. Retrying with lower accuracy...");
+                        // Fallback to low accuracy
+                        navigator.geolocation.getCurrentPosition(
+                            () => {
+                                setStatus("scanning");
+                                setShowScanner(true);
+                                setErrorMsg("");
+                            },
+                            () => {
+                                setStatus("error");
+                                setErrorMsg("Location request timed out. Please check your GPS settings.");
+                            },
+                            { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
+                        );
+                        return;
+                    default:
+                        setStatus("error"); // Ensure status is error even for default case
+                        setErrorMsg("An unknown error occurred while getting location.");
+                        break;
+                }
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 10000 }
+        );
+    };
+
+    const handleScanSuccess = async (decodedText) => {
+        // Stop scanning immediately
+        setShowScanner(false);
+        
+        let qrData;
+        try {
+            qrData = JSON.parse(decodedText);
+            // Basic validation of QR structure
+            if (!qrData.subjectId || !qrData.date || !qrData.sessionId || !qrData.token) {
+                 setStatus("error");
+                 setErrorMsg("Invalid QR code format.");
+                 return;
+            }
+        } catch {
+            setStatus("error");
+            setErrorMsg("Failed to parse QR code.");
+            return;
+        }
+
+        setStatus("submitting");
+
+        // Use the location we hopefully already have, or get it again
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const { latitude, longitude } = position.coords;
+                submitAttendance(qrData, latitude, longitude);
+            },
+            (err) => {
+                console.error("Location error during submission:", err);
+                if (err.code === err.TIMEOUT) {
+                    // Fallback to low accuracy
+                    navigator.geolocation.getCurrentPosition(
+                        (pos) => {
+                            const { latitude, longitude } = pos.coords;
+                            submitAttendance(qrData, latitude, longitude);
+                        },
+                        () => {
+                            setStatus("error");
+                            setErrorMsg("Could not retrieve location for verification.");
+                        },
+                        { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
+                    );
+                    return;
+                }
+                setStatus("error");
+                setErrorMsg("Could not retrieve location for verification.");
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 20000 } // Allow slightly older cached position
+        );
+    };
+
+    const submitAttendance = async (qrData, lat, lng) => {
+        let webauthnCredential = null;
+
+        try {
+            // Attempt biometric authentication
+            setStatus("verifying_bio");
+            webauthnCredential = await authenticateDevice();
+        } catch (err) {
+            console.error("Biometric auth failed:", err);
+            
+            // If the user explicitly cancelled, we stop.
+            if (err.name === 'NotAllowedError' || err.message.includes("cancelled")) {
+                 setStatus("error");
+                 setErrorMsg("Biometric check cancelled. Attendance not marked.");
+                 return;
+            }
+
+            // CRITICAL: If biometric auth is REQUIRED, we must NOT proceed on error.
+            // For now, we assume it is required.
+            setStatus("error");
+            setErrorMsg(`Biometric Verification Failed: ${err.message || "Unknown error"}`);
+            return;
+        }
+
+        setStatus("submitting");
+        try {
+            const payload = {
+                subjectId: qrData.subjectId,
+                date: qrData.date,
+                sessionId: qrData.sessionId,
+                token: qrData.token,
+                latitude: lat,
+                longitude: lng,
+                webauthn_credential: webauthnCredential ? webauthnCredential : null
+            };
+
+            // Use the correct endpoint path - previous code used /api/attendance/mark-qr
+            // Check if existing api client has base url. 
+            // api is axiosClient.js. Usually has baseURL.
+            // If code used "/api/attendance/mark-qr", it implies baseURL might not include /api prefix or it's duplicated?
+            // Let's assume standard axios client usage. The previous code had "/api/attendance/mark-qr".
+            // Let's respect that.
+            const response = await api.post("/attendance/mark-qr", payload);
+
+            if (response.data.status === "success") {
+                 setStatus("success");
+            } else if (response.data.proxy_suspected) {
+                setStatus("proxy");
+            } else {
+                 setStatus("success");
+            }
+            sessionStorage.removeItem("deviceBindingRequired");
+        } catch (error) {
+            // Check if it's a device binding error
+            if (error.response?.status === 403 && 
+                error.response?.data?.detail?.includes("New device detected")) {
+                // Store pending attendance data  
+                // We need to store qrData, lat, lng to retry.
+                // But submitAttendance expects them. 
+                // The setPendingAttendanceData called below uses {qrData, lat, lng} object.
+                setPendingAttendanceData({ qrData, lat, lng });
+                
+                // Get user email
+                const user = JSON.parse(localStorage.getItem("user") || "{}");
+                setUserEmail(user.email || "");
+                
+                // Show device binding modal
+                setShowDeviceBindingModal(true);
+                setStatus("idle");
+            } else if (error.response?.status === 409) {
+                setStatus("already-marked");
+            } else {
+                setStatus("error");
+                setErrorMsg(error.response?.data?.detail || "An error occurred while submitting attendance.");
+            }
+        }
+    };
+
+    const handleDeviceBindingSuccess = async () => {
+        setShowDeviceBindingModal(false);
+        sessionStorage.removeItem("deviceBindingRequired");
+        
+        // Retry attendance if we have pending data
+        if (pendingAttendanceData) {
+            const { qrData, lat, lng } = pendingAttendanceData;
+            setPendingAttendanceData(null);
+            await submitAttendance(qrData, lat, lng);
+        }
+    };
+
+    return (
+        <div className="min-h-screen bg-[var(--bg-primary)] flex flex-col font-sans text-[var(--text-main)]">
+            {/* Header */}
+            <header className="px-6 py-5 bg-[var(--bg-card)] border-b border-[var(--border-color)] flex items-center justify-between sticky top-0 z-10">
+                <button
+                    onClick={() => navigate(-1)}
+                    className="p-2 -ml-2 text-[var(--text-body)]/80 hover:bg-[var(--bg-secondary)] rounded-full transition-colors"
+                    aria-label="Go back"
+                >
+                    <ArrowLeft size={24} />
+                </button>
+                <h1 className="text-xl font-bold text-[var(--text-main)]">Mark Attendance</h1>
+                <div className="w-10"></div> {/* Spacer */}
+            </header>
+
+            <main className="flex-1 p-6 flex flex-col items-center justify-center max-w-lg mx-auto w-full">
+
+                {status === "idle" && (
+                    <div className="space-y-8 text-center animate-in fade-in slide-in-from-bottom-4 duration-500">
+                        <div className="relative mx-auto w-48 h-48 bg-[var(--action-info-bg)]/10 rounded-full flex items-center justify-center text-[var(--action-info-bg)] shadow-inner">
+                            <QrCode size={80} strokeWidth={1.5} />
+                            <div className="absolute -bottom-2 -right-2 bg-[var(--success)] text-[var(--text-on-primary)] p-3 rounded-2xl shadow-lg animate-bounce duration-[2000ms]">
+                                <ShieldCheck size={28} />
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <h2 className="text-2xl font-black text-[var(--text-main)] leading-tight">Ready to check in?</h2>
+                            <p className="text-[var(--text-body)]/80 text-sm max-w-xs mx-auto">
+                                Scan the QR code displayed on your teacher&apos;s screen to mark your attendance instantly.
+                            </p>
+                        </div>
+
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-3 text-xs font-bold text-[var(--text-body)]/80 uppercase tracking-widest justify-center">
+                                <span className="w-8 h-px bg-[var(--border-color)]"></span>
+                                Requirements
+                                <span className="w-8 h-px bg-[var(--border-color)]"></span>
+                            </div>
+                            <div className="flex justify-center gap-6">
+                                <div className="flex flex-col items-center gap-2">
+                                    <div className="w-12 h-12 bg-[var(--bg-card)] rounded-2xl border border-[var(--border-color)]/40 shadow-sm flex items-center justify-center text-[var(--text-body)]/80">
+                                        <Navigation size={20} />
+                                    </div>
+                                    <span className="text-[10px] font-bold text-[var(--text-body)]/80">Live GPS</span>
+                                </div>
+                                <div className="flex flex-col items-center gap-2">
+                                    <div className="w-12 h-12 bg-[var(--bg-card)] rounded-2xl border border-[var(--border-color)]/40 shadow-sm flex items-center justify-center text-[var(--text-body)]/80">
+                                        <MapPin size={20} />
+                                    </div>
+                                    <span className="text-[10px] font-bold text-[var(--text-body)]/80">In Class</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button
+                            onClick={startScanning}
+                            className="w-full bg-[var(--action-info-bg)]  hover:bg-[var(--action-info-hover)] active:scale-95 text-[var(--text-on-primary)] py-4 px-8 rounded-2xl font-bold shadow-xl shadow-black/10 transition-all flex items-center justify-center gap-3 text-lg"
+                        >
+                            <QrCode size={22} />
+                            Allow Location & Scan
+                        </button>
+                    </div>
+                )}
+
+                {(status === "geolocating" || status === "submitting" || status === "verifying_bio") && (
+                    <div className="text-center space-y-6">
+                        <div className="relative">
+                            <div className="w-24 h-24 border-4 border-[var(--border-color)]/40 border-t-[var(--action-info-bg)] rounded-full animate-spin mx-auto"></div>
+                            <div className="absolute inset-0 flex items-center justify-center text-[var(--action-info-bg)]">
+                                {status === "geolocating" ? <Navigation size={32} /> : status === "verifying_bio" ? <ShieldCheck size={32} /> : <Loader2 size={32} className="animate-spin" />}
+                            </div>
+                        </div>
+                        <div className="space-y-2">
+                            <h3 className="text-xl font-bold text-[var(--text-main)]">
+                                {status === "geolocating" ? "Locating you..." : status === "verifying_bio" ? "Verify Identity" : "Processing..."}
+                            </h3>
+                            <p className="text-[var(--text-body)]/80 text-sm">
+                                {status === "geolocating"
+                                    ? "We&apos;re verifying you&apos;re in the classroom."
+                                    : status === "verifying_bio" ? "Please verify your identity using your device biometrics." : "Hang tight, we&apos;re marking your attendance."}
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {status === "success" && (
+                    <div className="text-center space-y-8 animate-in zoom-in duration-300">
+                        <div className="w-24 h-24 bg-[var(--success)]/15 text-[var(--success)] rounded-full flex items-center justify-center mx-auto shadow-lg shadow-black/10">
+                            <CheckCircle2 size={56} strokeWidth={2.5} />
+                        </div>
+                        <div className="space-y-4">
+                            <h2 className="text-3xl font-black text-[var(--text-main)]">Success!</h2>
+                            <p className="text-[var(--text-body)]">
+                                Your attendance has been marked successfully. Have a great class!
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => navigate("/student-dashboard")}
+                            className="w-full bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-[var(--text-on-primary)] py-4 px-8 rounded-2xl font-bold transition-all shadow-xl"
+                        >
+                            Back to Dashboard
+                        </button>
+                    </div>
+                )}
+
+                {status === "proxy" && (
+                    <div className="text-center space-y-8 animate-in zoom-in duration-300">
+                        <div className="w-24 h-24 bg-[var(--danger)]/15 text-[var(--danger)] rounded-full flex items-center justify-center mx-auto shadow-lg shadow-black/10">
+                            <XCircle size={56} strokeWidth={2.5} />
+                        </div>
+                        <div className="space-y-4">
+                            <h2 className="text-3xl font-black text-[var(--text-main)]">Proxy Detected!</h2>
+                            <p className="text-[var(--text-body)]">
+                                You are too far from the classroom. Your attendance has been marked as proxy.
+                            </p>
+                        </div>
+                        <button
+                            onClick={() => navigate("/student-dashboard")}
+                            className="w-full bg-[var(--danger)] hover:bg-[var(--danger)]/80 text-white py-4 px-8 rounded-2xl font-bold transition-all shadow-xl"
+                        >
+                            Back to Dashboard
+                        </button>
+                    </div>
+                )}
+
+                {status === "already-marked" && (
+                    <div className="text-center space-y-8 animate-in zoom-in duration-300">
+                         <div className="w-24 h-24 bg-[var(--action-info-bg)]/15 text-[var(--action-info-bg)] rounded-full flex items-center justify-center mx-auto shadow-lg shadow-black/10">
+                             <CheckCircle2 size={56} strokeWidth={2.5} />
+                         </div>
+                         <div className="space-y-4">
+                             <h2 className="text-3xl font-black text-[var(--text-main)]">Already Marked!</h2>
+                             <p className="text-[var(--text-body)]">
+                                 You have already marked your attendance for this session.
+                             </p>
+                         </div>
+                         <button
+                             onClick={() => navigate("/student-dashboard")}
+                             className="w-full bg-[var(--action-info-bg)] hover:bg-[var(--action-info-hover)] text-[var(--text-on-primary)] py-4 px-8 rounded-2xl font-bold transition-all shadow-xl"
+                         >
+                             Back to Dashboard
+                         </button>
+                    </div>
+                )}
+
+                {status === "error" && (
+                    <div className="text-center space-y-8">
+                        <div className="w-24 h-24 bg-[var(--danger)]/15 text-[var(--danger)] rounded-full flex items-center justify-center mx-auto shadow-lg shadow-black/10">
+                            <XCircle size={56} strokeWidth={2.5} />
+                        </div>
+                        <div className="space-y-4">
+                            <h2 className="text-3xl font-black text-[var(--text-main)]">Oops!</h2>
+                            <div className="p-4 bg-[var(--danger)]/10 border border-[var(--danger)]/20 rounded-2xl text-[var(--danger)] text-sm leading-relaxed">
+                                {errorMsg || "Something went wrong while marking your attendance."}
+                            </div>
+                        </div>
+                        <div className="flex flex-col gap-3 w-full">
+                            <button
+                                onClick={startScanning}
+                                className="w-full bg-[var(--action-info-bg)] hover:bg-[var(--action-info-hover)] text-[var(--text-on-primary)] py-4 px-8 rounded-2xl font-bold transition-all shadow-xl shadow-black/10"
+                            >
+                                Try Again
+                            </button>
+                            <button
+                                onClick={() => navigate("/student-dashboard")}
+                                className="w-full bg-[var(--bg-card)] border border-[var(--border-color)] text-[var(--text-body)] py-4 px-8 rounded-2xl font-bold transition-all"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {showScanner && (
+                    <QRScanner
+                        onScanSuccess={handleScanSuccess}
+                        onClose={() => {
+                            setShowScanner(false);
+                            setStatus("idle");
+                        }}
+                    />
+                )}
+
+                {/* Device Binding OTP Modal */}
+                {showDeviceBindingModal && (
+                    <DeviceBindingOTPModal
+                        isOpen={showDeviceBindingModal}
+                        onClose={() => setShowDeviceBindingModal(false)}
+                        onSuccess={handleDeviceBindingSuccess}
+                        email={userEmail}
+                    />
+                )}
+            </main>
+
+            {/* Privacy Footer */}
+            <footer className="p-8 text-center bg-[var(--bg-primary)] border-t border-[var(--border-color)]">
+                <div className="flex items-center justify-center gap-2 text-[var(--text-body)]/80 mb-3">
+                    <ShieldCheck size={16} />
+                    <span className="text-xs font-bold uppercase tracking-widest">Secure Verification</span>
+                </div>
+                <p className="text-[10px] text-[var(--text-body)]/80 leading-relaxed max-w-[200px] mx-auto">
+                    This app validates your session using live location and camera data to prevent proxy attendance.
+                </p>
+            </footer>
+        </div>
+    );
+}

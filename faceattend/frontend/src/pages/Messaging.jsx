@@ -1,0 +1,762 @@
+import React, { useState, useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import {
+  Mail,
+  Send,
+  AlertTriangle,
+  BookOpen,
+  GraduationCap,
+  MessageSquare,
+  Users,
+  CheckCircle,
+  BarChart3,
+  Loader2,
+} from "lucide-react";
+import {
+  sendAbsenceNotifications,
+  sendAssignmentReminders,
+  sendExamAlerts,
+  sendCustomMessage,
+  getEmailStats,
+} from "../api/notifications";
+import { getStudents } from "../api/students";
+import { fetchMySubjects } from "../api/teacher";
+import Spinner from "../components/Spinner";
+
+export default function Messaging() {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [user] = useState(() => {
+    try {
+      const data = localStorage.getItem("user");
+      return data ? JSON.parse(data) : null;
+    } catch (error) {
+      console.error("Failed to parse user data:", error);
+      return null;
+    }
+  });
+
+  const [activeTab, setActiveTab] = useState("absence");
+  const [students, setStudents] = useState([]);
+  const [subjects, setSubjects] = useState([]);
+  const [selectedStudents, setSelectedStudents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loadingStudents, setLoadingStudents] = useState(true);
+  const [stats, setStats] = useState(null);
+  const [result, setResult] = useState(null);
+
+  // Form data for different notification types
+  const [absenceData, setAbsenceData] = useState({
+    subject: "",
+    date: new Date().toISOString().split("T")[0],
+  });
+
+  const [assignmentData, setAssignmentData] = useState({
+    assignment_title: "",
+    subject: "",
+    due_date: "",
+  });
+
+  const [examData, setExamData] = useState({
+    exam_name: "",
+    subject: "",
+    exam_date: "",
+    time: "",
+    venue: "",
+  });
+
+  const [customData, setCustomData] = useState({
+    message_title: "",
+    message_body: "",
+  });
+
+  // Clear selected students when active tab or subject changes
+  useEffect(() => {
+    setSelectedStudents([]);
+  }, [activeTab, absenceData.subject, assignmentData.subject, examData.subject]);
+
+  // Redirect if user is not authenticated
+  useEffect(() => {
+    if (!user) {
+      navigate("/login", { replace: true });
+    }
+  }, [user, navigate]);
+
+  useEffect(() => {
+    loadStudents();
+    loadSubjects();
+    loadStats();
+  }, []);
+
+  const loadSubjects = async () => {
+    try {
+      const response = await fetchMySubjects();
+      setSubjects(response || []);
+
+      // Auto-select if only one subject
+      if (response && response.length === 1) {
+        const subjectId = response[0]._id;
+        setAbsenceData((prev) => ({ ...prev, subject: subjectId }));
+        setAssignmentData((prev) => ({ ...prev, subject: subjectId }));
+        setExamData((prev) => ({ ...prev, subject: subjectId }));
+      }
+    } catch (error) {
+      console.error("Failed to load subjects:", error);
+    }
+  };
+
+  const loadStudents = async () => {
+    try {
+      setLoadingStudents(true);
+      const response = await getStudents();
+      setStudents(response.students || []);
+    } catch (error) {
+      console.error("Failed to load students:", error);
+    } finally {
+      setLoadingStudents(false);
+    }
+  };
+
+  const loadStats = async () => {
+    try {
+      const statsData = await getEmailStats(30);
+      setStats(statsData);
+    } catch (error) {
+      console.error("Failed to load stats:", error);
+    }
+  };
+
+  const filteredStudents = useMemo(() => {
+    if (activeTab === "custom") {
+      return students;
+    }
+
+    let selectedSubjectId = "";
+    if (activeTab === "absence") selectedSubjectId = absenceData.subject;
+    if (activeTab === "assignment") selectedSubjectId = assignmentData.subject;
+    if (activeTab === "exam") selectedSubjectId = examData.subject;
+
+    if (!selectedSubjectId) return [];
+
+    const subject = subjects.find((s) => s._id === selectedSubjectId);
+    if (!subject || !subject.students) return [];
+
+    return students.filter((student) => subject.students.includes(student.user_id));
+  }, [activeTab, absenceData.subject, assignmentData.subject, examData.subject, students, subjects]);
+
+  const handleSelectAll = () => {
+    const allSelected = filteredStudents.length > 0 && filteredStudents.every(s => selectedStudents.includes(s.email));
+    
+    if (allSelected) {
+      setSelectedStudents([]);
+    } else {
+      setSelectedStudents(filteredStudents.map((s) => s.email));
+    }
+  };
+
+  const handleStudentToggle = (email) => {
+    setSelectedStudents((prev) =>
+      prev.includes(email) ? prev.filter((e) => e !== email) : [...prev, email]
+    );
+  };
+
+  const handleSendAbsence = async () => {
+    if (!absenceData.subject || selectedStudents.length === 0) {
+      alert(t('messaging.alerts.fill_all'));
+      return;
+    }
+
+    const subjectObj = subjects.find((s) => s._id === absenceData.subject);
+    const subjectName = subjectObj ? subjectObj.name : absenceData.subject;
+
+    setLoading(true);
+    setResult(null);
+
+    try {
+      const response = await sendAbsenceNotifications({
+        student_emails: selectedStudents,
+        subject: subjectName,
+        date: absenceData.date,
+        teacher_name: user?.name || "Your Teacher",
+      });
+
+      setResult(response);
+      setSelectedStudents([]);
+      setAbsenceData({ subject: "", date: new Date().toISOString().split("T")[0] });
+      loadStats(); // Refresh stats
+    } catch (error) {
+      console.error("Failed to send notifications:", error);
+      alert(t('messaging.alerts.failed_send'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSendAssignment = async () => {
+    if (
+      !assignmentData.assignment_title ||
+      !assignmentData.subject ||
+      !assignmentData.due_date ||
+      selectedStudents.length === 0
+    ) {
+      alert(t('messaging.alerts.fill_all'));
+      return;
+    }
+
+    const subjectObj = subjects.find((s) => s._id === assignmentData.subject);
+    const subjectName = subjectObj ? subjectObj.name : assignmentData.subject;
+
+    setLoading(true);
+    setResult(null);
+
+    try {
+      const response = await sendAssignmentReminders({
+        student_emails: selectedStudents,
+        assignment_title: assignmentData.assignment_title,
+        subject: subjectName,
+        due_date: assignmentData.due_date,
+        teacher_name: user?.name || "Your Teacher",
+      });
+
+      setResult(response);
+      setSelectedStudents([]);
+      setAssignmentData({ assignment_title: "", subject: "", due_date: "" });
+      loadStats();
+    } catch (error) {
+      console.error("Failed to send reminders:", error);
+      alert(t('messaging.alerts.failed_send'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSendExam = async () => {
+    if (
+      !examData.exam_name ||
+      !examData.subject ||
+      !examData.exam_date ||
+      !examData.time ||
+      !examData.venue ||
+      selectedStudents.length === 0
+    ) {
+      alert(t('messaging.alerts.fill_all'));
+      return;
+    }
+
+    const subjectObj = subjects.find((s) => s._id === examData.subject);
+    const subjectName = subjectObj ? subjectObj.name : examData.subject;
+
+    setLoading(true);
+    setResult(null);
+
+    try {
+      const response = await sendExamAlerts({
+        student_emails: selectedStudents,
+        exam_name: examData.exam_name,
+        subject: subjectName,
+        exam_date: examData.exam_date,
+        time: examData.time,
+        venue: examData.venue,
+      });
+
+      setResult(response);
+      setSelectedStudents([]);
+      setExamData({ exam_name: "", subject: "", exam_date: "", time: "", venue: "" });
+      loadStats();
+    } catch (error) {
+      console.error("Failed to send alerts:", error);
+      alert(t('messaging.alerts.failed_send'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSendCustom = async () => {
+    if (
+      !customData.message_title ||
+      !customData.message_body ||
+      selectedStudents.length === 0
+    ) {
+      alert(t('messaging.alerts.fill_all'));
+      return;
+    }
+
+    setLoading(true);
+    setResult(null);
+
+    try {
+      const response = await sendCustomMessage({
+        student_emails: selectedStudents,
+        message_title: customData.message_title,
+        message_body: customData.message_body,
+        teacher_name: user?.name || "Your Teacher",
+      });
+
+      setResult(response);
+      setSelectedStudents([]);
+      setCustomData({ message_title: "", message_body: "" });
+      loadStats();
+    } catch (error) {
+      console.error("Failed to send message:", error);
+      alert(t('messaging.alerts.failed_send'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const tabs = [
+    { id: "absence", label: t('messaging.tabs.absence'), icon: AlertTriangle },
+    { id: "assignment", label: t('messaging.tabs.assignment'), icon: BookOpen },
+    { id: "exam", label: t('messaging.tabs.exam'), icon: GraduationCap },
+    { id: "custom", label: t('messaging.tabs.custom'), icon: MessageSquare },
+  ];
+
+  return (
+    <div className="min-h-screen bg-[var(--bg-primary)] p-6 md:p-8">
+      <div className="max-w-7xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-[var(--text-main)]">{t('messaging.title')}</h1>
+            <p className="text-[var(--text-body)] mt-1">
+              {t('messaging.subtitle')}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="bg-[var(--bg-card)] border border-[var(--border-color)] rounded-lg px-4 py-2">
+              <div className="flex items-center gap-2">
+                <Mail className="text-[var(--primary)]" size={18} />
+                <div className="text-sm">
+                  <div className="text-[var(--text-body)]/80">{t('messaging.stats.emails_sent')}</div>
+                  <div className="font-bold text-[var(--text-main)]">
+                    {stats ? stats.total_sent : "—"}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left Column - Message Form */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Tabs */}
+            <div className="bg-[var(--bg-card)] rounded-lg shadow-sm border border-[var(--border-color)]">
+              <div className="flex border-b border-[var(--border-color)] overflow-x-auto">
+                {tabs.map((tab) => {
+                  const Icon = tab.icon;
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`flex items-center gap-2 px-6 py-4 text-sm font-medium transition-colors whitespace-nowrap ${
+                        activeTab === tab.id
+                          ? "text-[var(--primary)] border-b-2 border-[var(--primary)]"
+                          : "text-[var(--text-body)] hover:text-[var(--text-main)]"
+                      }`}
+                    >
+                      <Icon size={18} />
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="p-6">
+                {/* Absence Tab */}
+                {activeTab === "absence" && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                        {t('messaging.form.subject')}
+                      </label>
+                      <select
+                        value={absenceData.subject}
+                        onChange={(e) =>
+                          setAbsenceData({ ...absenceData, subject: e.target.value })
+                        }
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      >
+                        <option value="" disabled>
+                          {t('messaging.placeholders.subject')}
+                        </option>
+                        {subjects.map((subject) => (
+                          <option key={subject._id} value={subject._id}>
+                            {subject.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                        {t('messaging.form.date')}
+                      </label>
+                      <input
+                        type="date"
+                        value={absenceData.date}
+                        onChange={(e) =>
+                          setAbsenceData({ ...absenceData, date: e.target.value })
+                        }
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      />
+                    </div>
+                    <button
+                      onClick={handleSendAbsence}
+                      disabled={loading || selectedStudents.length === 0}
+                      className="w-full bg-[var(--primary)] text-[var(--text-on-primary)] px-6 py-3 rounded-lg hover:bg-[var(--primary-hover)] disabled:bg-[var(--bg-secondary)] disabled:text-[var(--text-body)] disabled:cursor-not-allowed font-medium flex items-center justify-center gap-2"
+                    >
+                      {loading ? (
+                        <Loader2 size={18} className="animate-spin" />
+                      ) : (
+                        <Send size={18} />
+                      )}
+                      {t('messaging.form.send_absence')}
+                    </button>
+                  </div>
+                )}
+
+                {/* Assignment Tab */}
+                {activeTab === "assignment" && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                        {t('messaging.form.assignment_title')}
+                      </label>
+                      <input
+                        type="text"
+                        value={assignmentData.assignment_title}
+                        onChange={(e) =>
+                          setAssignmentData({
+                            ...assignmentData,
+                            assignment_title: e.target.value,
+                          })
+                        }
+                        placeholder={t('messaging.placeholders.assignment_title')}
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                        {t('messaging.form.subject')}
+                      </label>
+                      <select
+                        value={assignmentData.subject}
+                        onChange={(e) =>
+                          setAssignmentData({ ...assignmentData, subject: e.target.value })
+                        }
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      >
+                        <option value="" disabled>
+                          {t('messaging.placeholders.subject')}
+                        </option>
+                        {subjects.map((subject) => (
+                          <option key={subject._id} value={subject._id}>
+                            {subject.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                        {t('messaging.form.due_date')}
+                      </label>
+                      <input
+                        type="date"
+                        value={assignmentData.due_date}
+                        onChange={(e) =>
+                          setAssignmentData({ ...assignmentData, due_date: e.target.value })
+                        }
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      />
+                    </div>
+                    <button
+                      onClick={handleSendAssignment}
+                      disabled={loading || selectedStudents.length === 0}
+                      className="w-full bg-[var(--primary)] text-[var(--text-on-primary)] px-6 py-3 rounded-lg hover:bg-[var(--primary-hover)] disabled:bg-[var(--bg-secondary)] disabled:text-[var(--text-body)] disabled:cursor-not-allowed font-medium flex items-center justify-center gap-2"
+                    >
+                      {loading ? (
+                        <Loader2 size={18} className="animate-spin" />
+                      ) : (
+                        <Send size={18} />
+                      )}
+                      {t('messaging.form.send_assignment')}
+                    </button>
+                  </div>
+                )}
+
+                {/* Exam Tab */}
+                {activeTab === "exam" && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                        {t('messaging.form.exam_name')}
+                      </label>
+                      <input
+                        type="text"
+                        value={examData.exam_name}
+                        onChange={(e) =>
+                          setExamData({ ...examData, exam_name: e.target.value })
+                        }
+                        placeholder={t('messaging.placeholders.exam_name')}
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                        {t('messaging.form.subject')}
+                      </label>
+                      <select
+                        value={examData.subject}
+                        onChange={(e) =>
+                          setExamData({ ...examData, subject: e.target.value })
+                        }
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      >
+                        <option value="" disabled>
+                          {t('messaging.placeholders.subject')}
+                        </option>
+                        {subjects.map((subject) => (
+                          <option key={subject._id} value={subject._id}>
+                            {subject.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                          {t('messaging.form.exam_date')}
+                        </label>
+                        <input
+                          type="date"
+                          value={examData.exam_date}
+                          onChange={(e) =>
+                            setExamData({ ...examData, exam_date: e.target.value })
+                          }
+                          className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                          {t('messaging.form.time')}
+                        </label>
+                        <input
+                          type="time"
+                          value={examData.time}
+                          onChange={(e) =>
+                            setExamData({ ...examData, time: e.target.value })
+                          }
+                          className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                        {t('messaging.form.venue')}
+                      </label>
+                      <input
+                        type="text"
+                        value={examData.venue}
+                        onChange={(e) =>
+                          setExamData({ ...examData, venue: e.target.value })
+                        }
+                        placeholder={t('messaging.placeholders.venue')}
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      />
+                    </div>
+                    <button
+                      onClick={handleSendExam}
+                      disabled={loading || selectedStudents.length === 0}
+                      className="w-full bg-[var(--primary)] text-[var(--text-on-primary)] px-6 py-3 rounded-lg hover:bg-[var(--primary-hover)] disabled:bg-[var(--bg-secondary)] disabled:text-[var(--text-body)] disabled:cursor-not-allowed font-medium flex items-center justify-center gap-2"
+                    >
+                      {loading ? (
+                        <Loader2 size={18} className="animate-spin" />
+                      ) : (
+                        <Send size={18} />
+                      )}
+                      {t('messaging.form.send_exam')}
+                    </button>
+                  </div>
+                )}
+
+                {/* Custom Message Tab */}
+                {activeTab === "custom" && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                         {t('messaging.form.message_title')}
+                      </label>
+                      <input
+                        type="text"
+                        value={customData.message_title}
+                        onChange={(e) =>
+                          setCustomData({ ...customData, message_title: e.target.value })
+                        }
+                        placeholder={t('messaging.placeholders.message_title')}
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--text-body)] mb-2">
+                         {t('messaging.form.message_body')}
+                      </label>
+                      <textarea
+                        value={customData.message_body}
+                        onChange={(e) =>
+                          setCustomData({ ...customData, message_body: e.target.value })
+                        }
+                        placeholder={t('messaging.placeholders.message_placeholder')}
+                        rows={6}
+                        maxLength={2000}
+                        className="w-full px-4 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] outline-none focus:ring-2 focus:ring-[var(--primary)] focus:border-transparent resize-none"
+                      />
+                      <div className="text-sm text-[var(--text-body)]/80 mt-1 text-right">
+                        {customData.message_body.length}/2000
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleSendCustom}
+                      disabled={loading || selectedStudents.length === 0}
+                      className="w-full bg-[var(--primary)] text-[var(--text-on-primary)] px-6 py-3 rounded-lg hover:bg-[var(--primary-hover)] disabled:bg-[var(--bg-secondary)] disabled:text-[var(--text-body)] disabled:cursor-not-allowed font-medium flex items-center justify-center gap-2"
+                    >
+                      {loading ? (
+                        <Loader2 size={18} className="animate-spin" />
+                      ) : (
+                        <Send size={18} />
+                      )}
+                      {t('messaging.form.send_custom')}
+                    </button>
+                  </div>
+                )}
+
+                {/* Result Display */}
+                {result && (
+                  <div
+                    className={`mt-6 p-4 rounded-lg border ${
+                      result.failed === 0
+                        ? "bg-[var(--success)]/10 border-[var(--success)]/25"
+                        : "bg-[var(--warning)]/10 border-[var(--warning)]/25"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      {result.failed === 0 ? (
+                        <CheckCircle className="text-[var(--success)] flex-shrink-0" size={20} />
+                      ) : (
+                        <AlertTriangle className="text-[var(--warning)] flex-shrink-0" size={20} />
+                      )}
+                      <div className="flex-1">
+                        <h3 className="font-semibold text-[var(--text-main)] mb-2">
+                          {t('messaging.summary.title')}
+                        </h3>
+                        <div className="text-sm text-[var(--text-body)] space-y-1">
+                          <div>{t('messaging.summary.total')}: {result.total}</div>
+                          <div className="text-[var(--success)]">✓ {t('messaging.summary.success')}: {result.sent}</div>
+                          {result.failed > 0 && (
+                            <div className="text-[var(--danger)]">✗ {t('messaging.summary.failed')}: {result.failed}</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Right Column - Student Selection */}
+          <div className="space-y-6">
+            <div className="bg-[var(--bg-card)] rounded-lg shadow-sm border border-[var(--border-color)] p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-[var(--text-main)] flex items-center gap-2">
+                  <Users size={18} />
+                  {t('messaging.recipients.select')}
+                </h3>
+                <button
+                  onClick={handleSelectAll}
+                  className="text-sm text-[var(--primary)] hover:opacity-90 font-medium"
+                >
+                  {selectedStudents.length === filteredStudents.length && filteredStudents.length > 0 ? t('messaging.recipients.deselect_all') : t('messaging.recipients.select_all')}
+                </button>
+              </div>
+
+              <div className="mb-4 p-3 bg-[var(--primary)]/10 border border-[var(--primary)]/25 rounded-lg">
+                <div className="text-sm text-[var(--text-main)]">
+                  <span className="font-semibold">{selectedStudents.length}</span> {t('messaging.recipients.students_selected')}
+                </div>
+              </div>
+
+              {loadingStudents ? (
+                <div className="flex justify-center py-8">
+                  <Spinner message={t('common.loading')} />
+                </div>
+              ) : (
+                <div className="max-h-96 overflow-y-auto space-y-2">
+                  {filteredStudents.length === 0 ? (
+                    <div className="text-center py-8 text-[var(--text-body)]/80">
+                      {t('messaging.recipients.no_students')}
+                    </div>
+                  ) : (
+                    filteredStudents.map((student) => (
+                      <label
+                        key={student.email}
+                        className="flex items-center gap-3 p-3 hover:bg-[var(--bg-primary)] rounded-lg cursor-pointer transition-colors"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedStudents.includes(student.email)}
+                          onChange={() => handleStudentToggle(student.email)}
+                          className="w-4 h-4 accent-[var(--primary)] border-[var(--border-color)] rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-card)]"
+                        />
+                        <div className="flex-1">
+                          <div className="text-sm font-medium text-[var(--text-main)]">
+                            {student.name}
+                          </div>
+                          <div className="text-xs text-[var(--text-body)]/80">{student.email}</div>
+                        </div>
+                      </label>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Stats Card */}
+            {stats && (
+              <div className="bg-[var(--bg-card)] rounded-lg shadow-sm border border-[var(--border-color)] p-6">
+                <h3 className="font-semibold text-[var(--text-main)] flex items-center gap-2 mb-4">
+                  <BarChart3 size={18} />
+                  {t('messaging.stats.title')}
+                </h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-[var(--text-body)]">{t('messaging.stats.total_sent')}</span>
+                    <span className="font-semibold text-[var(--success)]">{stats.total_sent}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-[var(--text-body)]">{t('messaging.stats.failed')}</span>
+                    <span className="font-semibold text-[var(--danger)]">{stats.total_failed}</span>
+                  </div>
+                  {stats.sent_by_type && Object.keys(stats.sent_by_type).length > 0 && (
+                    <>
+                      <hr className="my-3 border-[var(--border-color)]" />
+                      <div className="text-xs font-medium text-[var(--text-body)]/80 uppercase">{t('messaging.stats.by_type')}</div>
+                      {Object.entries(stats.sent_by_type).map(([type, counts]) => (
+                        <div key={type} className="flex justify-between items-center text-sm">
+                          <span className="text-[var(--text-body)] capitalize">
+                            {type.replaceAll("_", " ")}
+                          </span>
+                          <span className="text-[var(--text-main)]">{counts.sent}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

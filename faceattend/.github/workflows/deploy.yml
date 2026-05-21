@@ -1,0 +1,61 @@
+name: Deploy to Staging
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Detect changed files to deploy only affected services
+      - name: Check for changed files
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+            backend:
+              - 'server/backend-api/**'
+            ml:
+              - 'server/ml-service/**'
+      
+      # Frontend Deployment (Vercel)
+      - name: Deploy Frontend to Vercel (Staging)
+        if: steps.changes.outputs.frontend == 'true'
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: ./frontend
+          github-comment: true
+
+      # Backend API Deployment (Render Webhook)
+      - name: Trigger Backend API Staging Deploy
+        if: steps.changes.outputs.backend == 'true'
+        run: |
+          if [ -n "${{ secrets.RENDER_BACKEND_DEPLOY_HOOK_STAGING }}" ]; then
+            curl --fail --show-error -X POST "${{ secrets.RENDER_BACKEND_DEPLOY_HOOK_STAGING }}"
+          else
+             echo "RENDER_BACKEND_DEPLOY_HOOK_STAGING secret not set, skipping deployment."
+          fi
+
+      # ML Service Deployment (Render Webhook)
+      - name: Trigger ML Service Staging Deploy
+        if: steps.changes.outputs.ml == 'true'
+        run: |
+           if [ -n "${{ secrets.RENDER_ML_DEPLOY_HOOK_STAGING }}" ]; then
+            curl --fail --show-error -X POST "${{ secrets.RENDER_ML_DEPLOY_HOOK_STAGING }}"
+           else
+             echo "RENDER_ML_DEPLOY_HOOK_STAGING secret not set, skipping deployment."
+           fi

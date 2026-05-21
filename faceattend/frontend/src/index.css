@@ -1,0 +1,273 @@
+/* frontend/src/index.css */
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Custom theme extensions for responsive breakpoints */
+@theme {
+  /* Add xs breakpoint for extra small screens (480px) */
+  --breakpoint-xs: 480px;
+}
+
+/* Accessibility: Skip Link */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: #4F46E5;
+  color: white;
+  padding: 8px 16px;
+  text-decoration: none;
+  z-index: 100;
+  border-radius: 0 0 4px 0;
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  top: 0;
+}
+
+/* DEFAULT (Light) */
+:root,
+[data-theme="Light"] {
+  --bg-primary: #f8fafc;
+  --bg-secondary: #e5e7eb;
+  --bg-card: #ffffff;
+
+  --text-main: #0f172a;
+  --text-body: #475569;
+
+  --border-color: #e5e7eb;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+}
+
+/* Dark Theme */
+[data-theme="Dark"] {
+  --bg-primary: #020617;
+  --bg-secondary: #020617;
+  --bg-card: #020617;
+
+  --text-main: #f8fafc;
+  --text-body: #cbd5f5;
+
+  --border-color: #334155;
+  --primary: #60a5fa;
+  --primary-hover: #93c5fd;
+}
+
+/* Forest */
+[data-theme="Forest"] {
+  --bg-primary: #022c22;
+  --bg-secondary: #064e3b;
+  --bg-card: #064e3b;
+
+  --text-main: #ecfdf5;
+  --text-body: #a7f3d0;
+
+  --border-color: #047857;
+  --primary: #34d399;
+  --primary-hover: #6ee7b7;
+}
+
+/* Cyber */
+[data-theme="Cyber"] {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-card: #020617;
+
+  --text-main: #22d3ee;
+  --text-body: #67e8f9;
+
+  --border-color: #164e63;
+  --primary: #06b6d4;
+  --primary-hover: #22d3ee;
+}
+
+
+/* Theme variables (light default) */
+:root {
+  /* Backgrounds */
+  --bg-primary: #F8F9FB;
+  /* The main page background */
+  --bg-card: #FFFFFF;
+  /* The white card containers */
+  --bg-secondary: #F3F4F6;
+  /* Light gray for sidebars or inputs */
+
+  /* Text Colors */
+  --text-main: #0d3180;
+  /* Darkest text (Headings) */
+  --text-body: #6B7280;
+  /* Muted text (Dates, subtitles) */
+  --text-on-primary: #FFFFFF;
+  /* White text on blue buttons */
+
+  /* Brand Colors */
+  --primary: #1e338f;
+  /* The main Blue color */
+  --primary-hover: #cde3ff;
+  /* Slightly darker blue for hover states */
+
+  /* Borders */
+  --border-color: #E5E7EB;
+  /* Subtle grey borders */
+
+  /* danger */
+  --danger: #ef4444;
+
+  --action-info-bg: #2563eb;
+  --action-info-hover: #1d4ed8;
+  --success: #10b981;  /* emerald-500 */
+  --warning: #f59e0b;  /* amber-500 */
+
+  --overlay: rgba(0, 0, 0, 0.5);
+}
+
+/* Modern Dark */
+[data-theme="Dark"] {
+  /* Backgrounds */
+  --bg-primary: #0F172A;
+  /* Deep Slate/Navy background */
+  --bg-card: #1E293B;
+  /* Lighter slate for cards */
+  --bg-secondary: #334155;
+  /* For inputs/secondary areas */
+
+  /* Text Colors */
+  --text-main: #F8FAFC;
+  /* Almost white for headings */
+  --text-body: #94A3B8;
+  /* Light gray for body text */
+  --text-on-primary: #FFFFFF;
+
+  /* Brand Colors */
+  --primary: #6366F1;
+  /* A slightly lighter Indigo to pop on dark bg */
+  --primary-hover: #818CF8;
+
+  /* Borders */
+  --border-color: #334155;
+
+  /* Danger */
+  --danger: #ef4444;
+
+    /* Action colors */
+  --success: #22c55e;       /* green-500 */
+  --warning: #f59e0b;       /* amber-500 */
+  --action-info-bg: #2563eb;      /* reuse existing hover (darker) */
+  --action-info-hover: #3b82f6;   /* optional: keep hover lighter */
+
+
+  --overlay: rgba(0, 0, 0, 0.6);
+
+}
+
+/* Forest theme */
+[data-theme="Forest"] {
+  /* Backgrounds */
+  --bg-primary: #F0FDF4;
+  /* Very pale mint */
+  --bg-card: #FFFFFF;
+  --bg-secondary: #DCFCE7;
+
+  /* Text Colors */
+  --text-main: #14532D;
+  /* Dark Green text */
+  --text-body: #64748B;
+  --text-on-primary: #FFFFFF;
+
+  /* Brand Colors */
+  --primary: #059669;
+  /* Emerald Green */
+  --primary-hover: #047857;
+
+  /* Borders */
+  --border-color: #BBF7D0;
+
+  /* Danger */
+  --danger: #ef4444;
+
+    /* Action colors */
+  --success: #16a34a;       /* green-600 */
+  --warning: #d97706;       /* amber-600 */
+  --action-info-bg: #059669;     /* base action info background (lighter) */
+  --action-info-hover: #047857;  /* darker hover state for action info */
+
+
+  --overlay: rgba(20, 83, 45, 0.4);
+
+}
+
+/* Cyber tech theme */
+[data-theme="Cyber"] {
+  /* Backgrounds */
+  --bg-primary: #120B2E;
+  /* Deep Violet/Black */
+  --bg-card: #201645;
+  /* Purple tinted card */
+  --bg-secondary: #2E225F;
+
+  /* Text Colors */
+  --text-main: #E9D5FF;
+  /* Light Lavender */
+  --text-body: #A5B4FC;
+  /* Periwinkle */
+  --text-on-primary: #120B2E;
+
+  /* Brand Colors */
+  --primary: #C084FC;
+  /* Bright Neon Purple */
+  --primary-hover: #D8B4FE;
+
+  /* Borders */
+  --border-color: #4C1D95;
+
+  /* Danger */
+  --danger: #ef4444;
+   
+    /* Action colors */
+  --success: #34d399;        /* neon mint */
+  --warning: #fbbf24;        /* bright amber */
+  --action-info-bg: #a855f7; /* neon purple */
+  --action-info-hover: #9333ea;
+
+  --overlay: rgba(18, 11, 46, 0.7);
+
+}
+
+
+
+/* Basic layout */
+html,
+body,
+#root {
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text-main);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+}
+
+/* small reusable components */
+.btn-primary {
+  @apply px-6 py-2 rounded-xl font-medium;
+  background: var(--primary);
+  color: var(--text-on-primary);
+  box-shadow: 0 8px 24px rgba(58, 122, 254, 0.12);
+}
+
+.btn-ghost {
+  @apply px-4 py-2 rounded-lg border;
+  border-color: var(--border-color);
+  background: transparent;
+}
+
+.card {
+  @apply bg-[var(--bg-card)] p-6 rounded-xl shadow-md;
+  border: 1px solid var(--border-color);
+}
+
+.safe-area-pb {
+  padding-bottom: env(safe-area-inset-bottom, 20px);
+}

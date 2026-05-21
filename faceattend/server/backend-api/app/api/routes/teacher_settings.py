@@ -1,0 +1,743 @@
+# backend/app/routes/settings.py
+import logging
+from datetime import datetime
+
+from app.db.mongo import db
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Request
+from bson import ObjectId, errors as bson_errors
+
+from app.core.cloudinary_config import cloudinary
+from app.utils.utils import serialize_bson
+from app.api.deps import get_current_teacher
+from app.services.subject_service import add_subject_for_teacher
+from app.db.subjects_repo import get_subjects_by_ids
+from app.services import schedule_service
+from app.schemas.schedule import Schedule
+from app.services.attendance_alerts import send_low_attendance_for_teacher
+from app.utils.file_security import file_validator
+from app.utils.rate_limiter import enforce_upload_rate_limit
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/settings", tags=["settings"])
+
+
+def validate_object_id(id_str: str, field_name: str = "id") -> ObjectId:
+    """Helper to validate and convert string to ObjectId"""
+    try:
+        return ObjectId(id_str)
+    except (bson_errors.InvalidId, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {field_name} format",
+        )
+
+
+# ---------------- GET SETTINGS ----------------
+@router.get("", response_model=dict)
+async def get_settings(current: dict = Depends(get_current_teacher)):
+    user_id = current["id"]
+
+    # fetched in dependency
+    user = current["user"]
+    teacher = current["teacher"]
+
+    # 1. Subject ids population
+    subject_ids = teacher.get("subjects", [])
+    subjects = await get_subjects_by_ids(subject_ids)
+
+    # Fetch schedule from dedicated service
+    # user_id is already ObjectId from deps
+    schedule_blob = await schedule_service.get_teacher_schedule_blob(str(user_id))
+
+    profile = {
+        "id": user_id,
+        # Identity (Users collection)
+        "name": user.get("name", ""),
+        "email": user.get("email", ""),
+        "role": "teacher",
+        "employee_id": user.get("employee_id"),
+        "phone": teacher.get("phone", ""),
+        "branch": teacher.get("branch"),
+        # Settings & Subjects
+        "avatarUrl": teacher.get("avatarUrl"),
+        "department": teacher.get("department"),
+        "subjects": subjects,
+        "settings": teacher.get("settings", {}),
+        "schedule": schedule_blob,
+    }
+
+    return serialize_bson(profile)
+
+
+# ---------------- PATCH SETTINGS ----------------
+@router.patch("")
+async def patch_settings_route(
+    payload: dict,
+    current: dict = Depends(get_current_teacher),
+):
+    if not payload or not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    user_id = validate_object_id(current["id"])
+    now = datetime.utcnow()
+
+    # Extract fields that need to sync across collections
+    user_updates = {}
+    for field in ("name", "email", "employee_id"):
+        if field in payload:
+            user_updates[field] = payload[field]
+
+    # Update users collection
+    if user_updates:
+        await db.users.update_one(
+            {"_id": user_id}, {"$set": {**user_updates, "updatedAt": now}}
+        )
+
+    # ---------------- TEACHERS COLLECTION ----------------
+    teacher_updates = {}
+
+    if "phone" in payload:
+        teacher_updates["phone"] = payload["phone"]
+
+    if "department" in payload:
+        teacher_updates["department"] = payload["department"]
+
+    if "settings" in payload and isinstance(payload["settings"], dict):
+        teacher_updates["settings"] = payload["settings"]
+
+    if teacher_updates:
+        result = await db.teachers.update_one(
+            {"userId": user_id}, {"$set": {**teacher_updates, "updatedAt": now}}
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    # ---------------- RETURN FRESH DATA ----------------
+    fresh_user = await db.users.find_one({"_id": user_id})
+    fresh_teacher = await db.teachers.find_one({"userId": user_id})
+
+    if not fresh_user or not fresh_teacher:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    subject_ids = fresh_teacher.get("subjects", [])
+    subjects = await get_subjects_by_ids(subject_ids)
+
+    schedule_blob = await schedule_service.get_teacher_schedule_blob(str(user_id))
+
+    profile = {
+        "id": str(user_id),
+        "name": fresh_user.get("name", ""),
+        "email": fresh_user.get("email", ""),
+        "phone": fresh_teacher.get("phone", ""),
+        "employee_id": fresh_user.get("employee_id"),
+        "role": "teacher",
+        "department": fresh_teacher.get("department"),
+        "avatarUrl": fresh_teacher.get("avatarUrl"),
+        "subjects": subjects,
+        "settings": fresh_teacher.get("settings", {}),
+        "schedule": schedule_blob,
+    }
+
+    return serialize_bson(profile)
+
+
+# ---------- MANUAL LOW ATTENDANCE NOTICE ----------
+@router.post("/send-low-attendance-notice")
+async def manual_send_low_attendance_notice(
+    current: dict = Depends(get_current_teacher),
+):
+    """Manually trigger low attendance email notices for the current teacher."""
+    teacher = current["teacher"]
+    teacher_id = current["id"]
+
+    try:
+        emails_sent = await send_low_attendance_for_teacher(teacher_id, teacher)
+    except Exception as e:
+        logger.error(f"Manual low attendance notice failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to send low attendance notices",
+        )
+
+    return {
+        "message": f"Low attendance notices sent successfully. Emails sent: {emails_sent}",  # noqa: E501
+        "emails_sent": emails_sent,
+    }
+
+
+# ---------------- PUT SETTINGS ----------------
+@router.put("", response_model=dict)
+async def put_settings_route(
+    payload: dict,
+    current: dict = Depends(get_current_teacher),
+):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload format")
+
+    updated = await replace_settings(current["id"], payload)
+    return serialize_bson(updated)
+
+
+# ---------------- AVATAR UPLOAD ----------------
+
+@router.post("/upload-avatar")
+async def upload_avatar(
+    request: Request,
+    file: UploadFile = File(...),
+    current: dict = Depends(get_current_teacher),
+):
+    """
+    Upload teacher avatar with comprehensive security validation.
+    
+    Security features:
+    - Rate limiting (5 uploads per hour per user)
+    - Magic number validation (file signature verification)
+    - Filename sanitization and path traversal prevention
+    - EXIF metadata stripping
+    - File size and dimension validation
+    - Content type verification
+    """
+    user_id = current["id"]
+    
+    # 1. Enforce rate limiting
+    await enforce_upload_rate_limit(
+        user_id=user_id,
+        operation="avatar_upload",
+        request=request
+    )
+    
+    # 2. Comprehensive file validation and security processing
+    try:
+        validation_result = await file_validator.validate_upload_file(
+            file=file,
+            max_size=5 * 1024 * 1024,  # 5MB
+            strip_metadata=True
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Avatar validation error for teacher {user_id}: {e}")
+        raise HTTPException(
+            status_code=400, 
+            detail="File validation failed. Please try with a different image."
+        )
+    
+    # 3. Log security validation results
+    logger.info(
+        f"Avatar upload validation passed for teacher {user_id}: "
+        f"filename={validation_result['filename']}, "
+        f"size={validation_result['size']}, "
+        f"mime_type={validation_result['mime_type']}, "
+        f"hash={validation_result['hash'][:16]}..."
+    )
+    
+    # 4. Upload processed image to Cloudinary with secure naming
+    try:
+        upload_result = cloudinary.uploader.upload(
+            validation_result['content'],
+            folder="teachers/avatars",  # Fixed typo: "avtars" -> "avatars"
+            public_id=f"teacher_{user_id}_{validation_result['hash'][:8]}",
+            overwrite=True,
+            resource_type="image",
+            # Additional security options
+            invalidate=True,  # Invalidate CDN cache
+            quality="auto:good",  # Optimize quality
+            fetch_format="auto"  # Auto-optimize format
+        )
+        
+        avatar_url = upload_result["secure_url"]
+        
+        # Log successful upload
+        logger.info(
+            f"Avatar uploaded successfully for teacher {user_id}: "
+            f"cloudinary_id={upload_result.get('public_id')}, "
+            f"url={avatar_url}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Cloudinary avatar upload failed for teacher {user_id}: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Avatar upload failed. Please try again later."
+        )
+
+    # 5. Update teacher record with audit trail
+    teacher_id = ObjectId(user_id)
+    try:
+        result = await db.teachers.update_one(
+            {"userId": teacher_id},
+            {
+                "$set": {
+                    "avatarUrl": avatar_url,
+                    "last_avatar_update": datetime.utcnow(),
+                    "avatar_image_hash": validation_result['hash']
+                }
+            },
+        )
+        
+        if result.matched_count == 0:
+            logger.warning(f"No teacher record found for user {user_id}")
+            raise HTTPException(status_code=404, detail="Teacher not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Database update failed for teacher {user_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save avatar. Please try again."
+        )
+
+    return {
+        "message": "Avatar uploaded successfully",
+        "avatarUrl": avatar_url,
+        "file_hash": validation_result['hash'][:16],  # Partial hash for verification
+        "processed_size": len(validation_result['content'])
+    }
+
+
+# Add - Subject
+@router.post("/add-subject", response_model=dict)
+async def add_subject(payload: dict, current: dict = Depends(get_current_teacher)):
+    name = payload.get("name")
+    code = payload.get("code")
+
+    if not name or not code:
+        raise HTTPException(status_code=400, detail="Name and Code required")
+
+    # Extract location if provided
+    location = None
+    if "latitude" in payload and "longitude" in payload:
+        lat_raw = payload.get("latitude")
+        lng_raw = payload.get("longitude")
+
+        # Check for valid values (allow 0 but reject empty strings or None)
+        if (
+            lat_raw is not None
+            and lng_raw is not None
+            and lat_raw != ""
+            and lng_raw != ""
+        ):
+            try:
+                lat = float(lat_raw)
+                lng = float(lng_raw)
+                rad = float(payload.get("radius", 50))  # Default 50m
+
+                if not (-90 <= lat <= 90):
+                    raise ValueError("Invalid latitude")
+                if not (-180 <= lng <= 180):
+                    raise ValueError("Invalid longitude")
+                if rad <= 0:
+                    raise ValueError("Invalid radius")
+
+                location = {"lat": lat, "long": lng, "radius": rad}
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid location coordinates or radius",
+                )
+
+    subject = await add_subject_for_teacher(
+        current["id"],
+        name.strip(),
+        code.strip().upper(),
+        location=location,
+    )
+
+    return serialize_bson(subject)
+
+
+async def replace_settings(user_id_str: str, payload: dict) -> dict:
+    """Replace teacher settings document fields. This intentionally allows replacing
+    `department`, `settings`, and `schedule` (a structured object matching
+    the UI). Returns the fresh teacher+user profile.
+    """
+    user_id = validate_object_id(user_id_str)
+    now = datetime.utcnow()
+
+    teacher_updates = {}
+
+    if "department" in payload:
+        teacher_updates["department"] = payload["department"]
+
+    if "settings" in payload and isinstance(payload["settings"], dict):
+        teacher_updates["settings"] = payload["settings"]
+
+    # Validating and saving schedule using the dedicated service.
+    # The dedicated service saves entries into the 'schedules' collection.
+    if "schedule" in payload:
+        if payload["schedule"] is None:
+            await schedule_service.save_teacher_schedule(
+                str(user_id), {"timetable": []}
+            )
+        elif isinstance(payload["schedule"], dict):
+            # optional deeper validation
+            try:
+                Schedule.parse_obj(payload["schedule"])
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid schedule format")
+
+            # Save to separate collection
+            await schedule_service.save_teacher_schedule(
+                str(user_id), payload["schedule"]
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Invalid schedule format")
+
+    if teacher_updates:
+        result = await db.teachers.update_one(
+            {"userId": user_id}, {"$set": {**teacher_updates, "updatedAt": now}}
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    # Return fresh merged profile
+    fresh_user = await db.users.find_one({"_id": user_id})
+    fresh_teacher = await db.teachers.find_one({"userId": user_id})
+    if not fresh_user or not fresh_teacher:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    subject_ids = fresh_teacher.get("subjects", [])
+    subjects = await get_subjects_by_ids(subject_ids)
+
+    # Fetch from dedicated collection
+    schedule_blob = await schedule_service.get_teacher_schedule_blob(str(user_id))
+
+    profile = {
+        "id": str(user_id),
+        "name": fresh_user.get("name", ""),
+        "email": fresh_user.get("email", ""),
+        "phone": fresh_teacher.get("phone", ""),
+        "employee_id": fresh_user.get("employee_id"),
+        "role": "teacher",
+        "department": fresh_teacher.get("department"),
+        "avatarUrl": fresh_teacher.get("avatarUrl"),
+        "subjects": subjects,
+        "settings": fresh_teacher.get("settings", {}),
+        "schedule": schedule_blob,
+    }
+
+    return profile
+
+
+# ---------- My subjects ----------------
+@router.get("/teachers/me/subjects", response_model=list)
+async def get_my_subjects(current_user: dict = Depends(get_current_teacher)):
+    prof_id = validate_object_id(current_user["id"])
+
+    subjects = await db.subjects.find({"professor_ids": prof_id}).to_list(length=100)
+
+    return [
+        {
+            "_id": str(s["_id"]),
+            "name": s["name"],
+            "code": s.get("code"),
+            "student_count": len(s.get("students", [])),
+            "students": [
+                str(st["student_id"])
+                for st in s.get("students", [])
+                if "student_id" in st
+            ],
+        }
+        for s in subjects
+    ]
+
+
+# GET STUDENTS OF A SUBJECT
+@router.get("/teachers/subjects/{subject_id}/students", response_model=list)
+async def get_subject_students(
+    subject_id: str, current_user: dict = Depends(get_current_teacher)
+):
+    prof_id = validate_object_id(current_user["id"])
+    subj_id = validate_object_id(subject_id, "subject_id")
+
+    # SECURITY: Ensure teacher teaches this subject
+    subject = await db.subjects.find_one(
+        {"_id": subj_id, "professor_ids": prof_id}, {"students": 1, "name": 1}
+    )
+
+    if not subject:
+        raise HTTPException(
+            status_code=404, detail="Subject not found or access denied"
+        )
+
+    subject_students = subject.get("students", [])
+    if not subject_students:
+        return []
+
+    student_user_ids = [s["student_id"] for s in subject_students]
+
+    students_cursor = db.students.find({"userId": {"$in": student_user_ids}})
+    users_cursor = db.users.find({"_id": {"$in": student_user_ids}})
+
+    students_map = {str(s["userId"]): s async for s in students_cursor}
+    users = {str(u["_id"]): u async for u in users_cursor}
+
+    response = []
+    for s in subject_students:
+        uid = str(s["student_id"])
+        user = users.get(uid)
+        if not user:
+            continue
+
+        student_doc = students_map.get(uid, {})
+
+        response.append(
+            {
+                "student_id": uid,
+                "name": user.get("name", "Unknown"),
+                "roll": student_doc.get("roll"),
+                "year": student_doc.get("year"),
+                "branch": student_doc.get("branch"),
+                "embeddings": student_doc.get("face_embeddings", []),
+                "avatar": student_doc.get("image_url"),
+                "verified": s.get("verified", False),
+                "attendance": s.get("attendance", {"present": 0, "absent": 0}),
+            }
+        )
+
+    return response
+
+
+# GET STUDENT ATTENDANCE TRENDS
+@router.get("/teachers/subjects/{subject_id}/students/trends", response_model=dict)
+async def get_students_attendance_trends(
+    subject_id: str, current_user: dict = Depends(get_current_teacher)
+):
+    """
+    Calculate attendance trends for all students in a subject.
+    Compares current week vs previous week attendance using attendance_logs.
+    """
+    from datetime import datetime, timedelta
+
+    prof_id = validate_object_id(current_user["id"])
+    subj_id = validate_object_id(subject_id, "subject_id")
+
+    # SECURITY: Ensure teacher teaches this subject
+    subject = await db.subjects.find_one(
+        {"_id": subj_id, "professor_ids": prof_id}, {"students": 1}
+    )
+
+    if not subject:
+        raise HTTPException(
+            status_code=404, detail="Subject not found or access denied"
+        )
+
+    subject_students = subject.get("students", [])
+    if not subject_students:
+        return {}
+
+    # Calculate date ranges for current and previous week
+    today = datetime.now().date()
+    current_week_start = today - timedelta(days=today.weekday())  # Monday
+    previous_week_start = current_week_start - timedelta(days=7)
+    previous_week_end = current_week_start - timedelta(days=1)
+
+    # Get attendance_daily document for this subject to count total classes
+    attendance_doc = await db.attendance_daily.find_one({"subjectId": subj_id})
+
+    if not attendance_doc or "daily" not in attendance_doc:
+        # No attendance data yet, return zero trends
+        return {
+            str(s["student_id"]): {
+                "trend": 0,
+                "current_percentage": 0,
+                "previous_percentage": 0,
+            }
+            for s in subject_students
+        }
+
+    daily_data = attendance_doc.get("daily", {})
+
+    # Count classes in each period
+    current_week_classes = []
+    previous_week_classes = []
+
+    for date_str in daily_data.keys():
+        try:
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+
+        if date_obj >= current_week_start:
+            current_week_classes.append(date_str)
+        elif previous_week_start <= date_obj <= previous_week_end:
+            previous_week_classes.append(date_str)
+
+    trends = {}
+
+    for student_entry in subject_students:
+        student_id = student_entry["student_id"]
+        student_id_str = str(student_id)
+
+        # Query attendance_logs for this student in this subject
+        # attendance_logs schema:
+        # { subjectId, date, students: [{ studentId, scanTime, method }] }
+
+        # Current week attendance
+        current_week_pipeline = [
+            {
+                "$match": {
+                    "subjectId": subj_id,
+                    "date": {"$in": current_week_classes},
+                }
+            },
+            {"$unwind": "$students"},
+            {
+                "$match": {
+                    "students.studentId": student_id,
+                }
+            },
+            {"$count": "count"},
+        ]
+        current_week_count = 0
+        async for doc in db.attendance_logs.aggregate(current_week_pipeline):
+            current_week_count = doc.get("count", 0)
+
+        # Previous week attendance
+        previous_week_pipeline = [
+            {
+                "$match": {
+                    "subjectId": subj_id,
+                    "date": {"$in": previous_week_classes},
+                }
+            },
+            {"$unwind": "$students"},
+            {
+                "$match": {
+                    "students.studentId": student_id,
+                }
+            },
+            {"$count": "count"},
+        ]
+        previous_week_count = 0
+        async for doc in db.attendance_logs.aggregate(previous_week_pipeline):
+            previous_week_count = doc.get("count", 0)
+
+        # Calculate percentages
+        current_percentage = (
+            round((current_week_count / len(current_week_classes)) * 100, 1)
+            if len(current_week_classes) > 0
+            else 0
+        )
+
+        previous_percentage = (
+            round((previous_week_count / len(previous_week_classes)) * 100, 1)
+            if len(previous_week_classes) > 0
+            else 0
+        )
+
+        # Calculate trend (difference between current and previous week)
+        trend = round(current_percentage - previous_percentage, 1)
+
+        trends[student_id_str] = {
+            "trend": trend,
+            "current_percentage": current_percentage,
+            "previous_percentage": previous_percentage,
+        }
+
+    return trends
+
+
+@router.post("/teachers/subjects/{subject_id}/students/{student_id}/verify")
+async def verify_student(
+    subject_id: str, student_id: str, current_user: dict = Depends(get_current_teacher)
+):
+    prof_id = validate_object_id(current_user["id"])
+    subj_id = validate_object_id(subject_id, "subject_id")
+    stud_id = validate_object_id(student_id, "student_id")
+
+    result = await db.subjects.update_one(
+        {"_id": subj_id, "professor_ids": prof_id, "students.student_id": stud_id},
+        {"$set": {"students.$.verified": True, "updated_at": datetime.utcnow()}},
+    )
+
+    if result.modified_count == 0:
+        exists = await db.subjects.find_one({"_id": subj_id})
+        if not exists:
+            raise HTTPException(status_code=404, detail="Subject not found")
+        raise HTTPException(
+            status_code=404, detail="Student not enrolled in this subject"
+        )
+
+    return {"message": "Student verified successfully"}
+
+
+@router.delete("/teachers/subjects/{subject_id}/students/{student_id}")
+async def remove_student(
+    subject_id: str, student_id: str, current_user: dict = Depends(get_current_teacher)
+):
+    prof_id = validate_object_id(current_user["id"])
+    subj_id = validate_object_id(subject_id, "subject_id")
+    stud_id = validate_object_id(student_id, "student_id")
+
+    subject = await db.subjects.find_one(
+        {"_id": subj_id, "professor_ids": prof_id}, {"_id": 1}
+    )
+    if not subject:
+        raise HTTPException(
+            status_code=404, detail="Subject not found or access denied"
+        )
+
+    await db.subjects.update_one(
+        {"_id": subj_id}, {"$pull": {"students": {"student_id": stud_id}}}
+    )
+
+    await db.students.update_one({"userId": stud_id}, {"$pull": {"subjects": subj_id}})
+
+    return {"message": "Student removed from subject"}
+
+
+# ---------------- GET ALL STUDENTS (FOR MESSAGING) ----------------
+@router.get("/teachers/students")
+async def get_all_students(current_user: dict = Depends(get_current_teacher)):
+    """Get all students for messaging purposes"""
+    prof_id = validate_object_id(current_user["id"])
+
+    # Get all subjects taught by the teacher
+    subjects = await db.subjects.find({"professor_ids": prof_id}).to_list(length=None)
+
+    # Aggregate all student IDs from these subjects
+    student_user_ids = set()
+    for subject in subjects:
+        for student in subject.get("students", []):
+            sid = student.get("student_id")
+            if sid:
+                student_user_ids.add(sid)
+
+    if not student_user_ids:
+        return {"students": []}
+
+    # Get students
+    students = await db.students.find(
+        {"userId": {"$in": list(student_user_ids)}}
+    ).to_list(length=None)
+
+    if not students:
+        return {"students": []}
+
+    # Batch fetch all user data
+    user_ids = [s.get("userId") for s in students if s.get("userId")]
+    users_cursor = db.users.find({"_id": {"$in": user_ids}})
+    users_map = {str(u["_id"]): u async for u in users_cursor}
+
+    student_list = []
+    for student in students:
+        uid = str(student.get("userId"))
+        user = users_map.get(uid)
+        if user:
+            student_list.append(
+                {
+                    "id": str(student["_id"]),
+                    "user_id": uid,
+                    "name": user.get("name", "Unknown"),
+                    "email": user.get("email", ""),
+                    "usn": user.get("usn", ""),
+                    "branch": student.get("branch", ""),
+                    "semester": student.get("semester", 0),
+                    "verified": student.get("verified", False),
+                }
+            )
+
+    return {"students": student_list}

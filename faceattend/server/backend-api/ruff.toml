@@ -1,0 +1,12 @@
+line-length = 88
+target-version = "py312"
+
+[lint]
+select = ["E", "F"]
+ignore = []
+
+# Ignore line length for test files and email templates
+[lint.per-file-ignores]
+"tests/**/*.py" = ["E501"]
+"**/email_template.py" = ["E501"]
+"**/reports.py" = ["E501"]

@@ -1,0 +1,270 @@
+from fastapi import APIRouter, Depends
+import time
+import numpy as np
+
+from app.schemas.requests import (
+    EncodeFaceRequest,
+    DetectFacesRequest,
+    MatchFacesRequest,
+    BatchMatchRequest,
+)
+from app.schemas.responses import (
+    EncodeFaceResponse,
+    DetectFacesResponse,
+    MatchFacesResponse,
+    BatchMatchResponse,
+    FaceLocation,
+    EncodeFaceMetadata,
+    DetectedFaceInfo,
+    DetectFacesMetadata,
+    MatchResult,
+    DistanceInfo,
+    BatchMatchResult,
+)
+from app.core.constants import (
+    ERROR_NO_FACE,
+    ERROR_MULTIPLE_FACES,
+    ERROR_FACE_TOO_SMALL,
+    ERROR_PROCESSING,
+)
+from app.core.security import verify_api_key
+from app.utils.image_validation import validate_and_decode_image, validate_and_decode_image_to_numpy
+
+from app.ml.face_detector import detect_faces
+from app.ml.face_encoder import get_face_embedding
+from app.ml.face_matcher import cosine_similarity
+from app.ml.liveness import is_live
+from app.core.config import settings
+
+router = APIRouter(
+    prefix="/api/ml", tags=["ML"], dependencies=[Depends(verify_api_key)]
+)
+
+
+@router.post("/encode-face", response_model=EncodeFaceResponse)
+async def encode_face(request: EncodeFaceRequest):
+    try:
+        # Validate and decode image directly to NumPy array (more efficient)
+        success, _image_bytes, image_np, error_msg, error_code = validate_and_decode_image_to_numpy(
+            request.image_base64
+        )
+
+        if not success:
+            return EncodeFaceResponse(
+                success=False, error=error_msg, error_code=error_code
+            )
+
+        # Convert PIL image to numpy array
+        image_np = np.array(image)
+
+        faces = detect_faces(image_np)
+
+        if not faces:
+            return EncodeFaceResponse(
+                success=False, error="No face detected", error_code=ERROR_NO_FACE
+            )
+
+        if request.validate_single and len(faces) > 1:
+            return EncodeFaceResponse(
+                success=False,
+                error="Multiple faces detected",
+                error_code=ERROR_MULTIPLE_FACES,
+            )
+
+        top, right, bottom, left = faces[0]
+
+        face_w = right - left
+        face_h = bottom - top
+
+        im_h, im_w, _ = image_np.shape
+        face_area = face_w * face_h
+        image_area = im_h * im_w
+
+        if (face_area / image_area) < request.min_face_area_ratio:
+            return EncodeFaceResponse(
+                success=False, error="Face too small", error_code=ERROR_FACE_TOO_SMALL
+            )
+
+        face_img = image_np[top:bottom, left:right]
+        embedding = get_face_embedding(face_img)
+
+        return EncodeFaceResponse(
+            success=True,
+            embedding=embedding,
+            face_location=FaceLocation(top=top, right=right, bottom=bottom, left=left),
+            metadata=EncodeFaceMetadata(
+                face_area_ratio=face_area / image_area, image_dimensions=[im_w, im_h]
+            ),
+        )
+
+    except Exception as e:
+        return EncodeFaceResponse(
+            success=False, error=str(e), error_code=ERROR_PROCESSING
+        )
+
+
+@router.post("/detect-faces", response_model=DetectFacesResponse)
+async def detect_faces_api(request: DetectFacesRequest):
+    start = time.time()
+
+    try:
+        # Validate and decode image directly to NumPy array (more efficient)
+        success, image_bytes, image_np, error_msg, error_code = validate_and_decode_image_to_numpy(
+            request.image_base64
+        )
+
+        if not success:
+            return DetectFacesResponse(success=False, error=error_msg)
+
+        # Convert PIL image to numpy array
+        image_np = np.array(image)
+
+        faces = detect_faces(image_np)
+        h, w, _ = image_np.shape
+        image_area = h * w
+
+        detected = []
+        for face_tuple in faces:
+            # faces detected are already in (top, right, bottom, left) format
+            top, right, bottom, left = face_tuple
+
+            face_width = right - left
+            face_height = bottom - top
+            face_area = face_width * face_height
+
+            if face_area / image_area < request.min_face_area_ratio:
+                continue
+
+            # Ensure coordinates are within image bounds
+            top = max(0, top)
+            left = max(0, left)
+            bottom = min(h, bottom)
+            right = min(w, right)
+
+            face_img = image_np[top:bottom, left:right]
+
+            # Liveness Check
+            live = True
+            if settings.ML_LIVENESS_CHECK:
+                live = is_live(face_img)
+
+            embedding = get_face_embedding(face_img)
+
+            detected.append(
+                DetectedFaceInfo(
+                    embedding=embedding,
+                    location=FaceLocation(
+                        top=top, right=right, bottom=bottom, left=left
+                    ),
+                    face_area_ratio=face_area / image_area,
+                    is_live=live,
+                )
+            )
+
+        return DetectFacesResponse(
+            success=True,
+            faces=detected,
+            count=len(detected),
+            metadata=DetectFacesMetadata(
+                image_dimensions=[w, h], processing_time_ms=(time.time() - start) * 1000
+            ),
+        )
+
+    except Exception as e:
+        return DetectFacesResponse(success=False, error=str(e))
+
+
+@router.post("/match-faces", response_model=MatchFacesResponse)
+async def match_faces(request: MatchFacesRequest):
+    try:
+        best_match = None
+        best_score = -1.0
+        all_distances = []
+
+        for candidate in request.candidate_embeddings:
+            scores = [
+                cosine_similarity(request.query_embedding, emb)
+                for emb in candidate.embeddings
+            ]
+            score = max(scores)
+
+            if request.return_all_distances:
+                all_distances.append(
+                    DistanceInfo(
+                        student_id=candidate.student_id, min_distance=1 - score
+                    )
+                )
+
+            if score > best_score:
+                best_score = score
+                best_match = candidate.student_id
+
+        if best_score >= request.threshold:
+            return MatchFacesResponse(
+                success=True,
+                match=MatchResult(
+                    student_id=best_match,
+                    distance=1 - best_score,
+                    confidence=best_score,
+                    status="confident",
+                ),
+                all_distances=all_distances if request.return_all_distances else None,
+            )
+
+        return MatchFacesResponse(success=True, match=None)
+
+    except Exception as e:
+        return MatchFacesResponse(success=False, error=str(e))
+
+
+@router.post("/batch-match", response_model=BatchMatchResponse)
+async def batch_match(request: BatchMatchRequest):
+    try:
+        results = []
+
+        for idx, face in enumerate(request.detected_faces):
+            # Check liveness first
+            if not getattr(face, "is_live", True):
+                results.append(
+                    BatchMatchResult(
+                        face_index=idx,
+                        student_id=None,
+                        distance=1.0,
+                        status="spoof",
+                        liveness=False,
+                    )
+                )
+                continue
+
+            best_id = None
+            best_score = -1.0
+
+            for candidate in request.candidate_embeddings:
+                scores = [
+                    cosine_similarity(face.embedding, emb)
+                    for emb in candidate.embeddings
+                ]
+                score = max(scores)
+
+                if score > best_score:
+                    best_score = score
+                    best_id = candidate.student_id
+
+            status = (
+                "present" if best_score >= request.confident_threshold else "unknown"
+            )
+
+            results.append(
+                BatchMatchResult(
+                    face_index=idx,
+                    student_id=best_id if status == "present" else None,
+                    distance=1 - best_score,
+                    status=status,
+                    liveness=True,
+                )
+            )
+
+        return BatchMatchResponse(success=True, matches=results)
+
+    except Exception as e:
+        return BatchMatchResponse(success=False, error=str(e))

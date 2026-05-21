@@ -1,0 +1,10 @@
+__pycache__
+.venv
+.env
+.git
+.gitignore
+Dockerfile
+tests/__pycache__
+*.pyc
+.DS_Store
+.ruff_cache

@@ -1,0 +1,40 @@
+name: PR Merged Thank You
+
+# 🚀 Trigger only when a PR is closed
+on:
+  pull_request_target:
+    types: [closed]
+
+# 🚀 Grant write permission to post comments
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  thank-contributor:
+    # ⚠️ CRITICAL: This ensures the job ONLY runs if the PR was actually merged
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post Thank You Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const creator = context.payload.pull_request.user.login;
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `
+            ## ✅ Merged!
+            
+            Thank you, @${creator}, for your contribution! 🚀
+            Your changes are now part of the project.
+            
+            ---
+            ### 🔍 Looking for more?
+            If you're interested in contributing again, please check out our other open tasks:
+            👉 [**View Open Issues**](https://github.com/nem-web/smart-attendance/issues)
+            `
+            });
