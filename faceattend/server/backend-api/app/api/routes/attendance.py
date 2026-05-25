@@ -2,7 +2,7 @@ import base64
 import base64
 import logging
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Dict
 
 from bson import ObjectId
@@ -236,7 +236,7 @@ async def websocket_endpoint(
                         match_resp = await ml_client.match_faces(
                             query_embedding=face["embedding"],
                             candidate_embeddings=candidate_embeddings,
-                            threshold=ML_UNCERTAIN_THRESHOLD,
+                            threshold=1.0 - ML_UNCERTAIN_THRESHOLD,
                         )
 
                         if not match_resp.get("success"):
@@ -284,9 +284,7 @@ async def websocket_endpoint(
                                             if user_info
                                             else "Unknown"
                                         ),
-                                        "roll": user_info.get("roll")
-                                        if user_info
-                                        else "",
+                                        "roll": matched_student.get("roll") or "",
                                     }
 
                         # Check liveness
@@ -960,7 +958,7 @@ async def mark_attendance(request: Request, response: Response, payload: Dict):
                 if not best_match
                 else {
                     "id": str(best_match["userId"]),
-                    "roll": user.get("roll") if user else None,
+                    "roll": best_match.get("roll") or (user.get("roll") if user else None),
                     "name": best_match["name"],
                 },
             }
@@ -1032,71 +1030,79 @@ async def confirm_attendance(payload: AttendanceConfirm):
     att_date = selected_date.isoformat() if selected_date else date.today().isoformat()
     today = att_date
 
-    # Mark PRESENT students
-    await db.subjects.update_one(
-        {"_id": subject_oid},
-        {
-            "$inc": {
-                "students.$[p].attendance.present": 1,
-                "students.$[p].attendance.total": 1,
-            },
-            "$set": {"students.$[p].attendance.lastMarkedAt": att_date},
-        },
-        array_filters=[
-            {
-                "p.student_id": {"$in": present_oids},
-                "p.attendance.lastMarkedAt": {"$ne": att_date},
-            }
-        ],
+    # Fetch existing log for today
+    existing_log = await db.attendance_logs.find_one(
+        {"subjectId": subject_oid, "date": att_date}
     )
+    previously_present = set()
+    if existing_log and "students" in existing_log:
+        previously_present = {str(s["studentId"]) for s in existing_log["students"]}
 
-    # Mark ABSENT students
-    await db.subjects.update_one(
-        {"_id": subject_oid},
-        {
-            "$inc": {
-                "students.$[a].attendance.absent": 1,
-                "students.$[a].attendance.total": 1,
-            },
-            "$set": {"students.$[a].attendance.lastMarkedAt": att_date},
-        },
-        array_filters=[
-            {
-                "a.student_id": {"$in": absent_oids},
-                "a.attendance.lastMarkedAt": {"$ne": att_date},
-            }
-        ],
-    )
+    # Calculate updates for each student enrolled in the subject
+    from pymongo import UpdateOne
+    bulk_ops = []
+    
+    for student in subject.get("students", []):
+        student_id_str = str(student["student_id"])
+        student_oid = student["student_id"]
+        
+        # Check if student is in our payload
+        if student_id_str not in present_set and student_id_str not in absent_set:
+            continue
+            
+        is_now_present = student_id_str in present_set
+        was_previously_present = student_id_str in previously_present
+        
+        # Current state in db
+        att = student.get("attendance", {})
+        last_marked = att.get("lastMarkedAt")
+        
+        present_inc = 0
+        absent_inc = 0
+        total_inc = 0
+        
+        if last_marked == att_date:
+            # Already marked today, check for changes
+            if is_now_present and not was_previously_present:
+                # Changed from absent to present
+                present_inc = 1
+                absent_inc = -1
+            elif not is_now_present and was_previously_present:
+                # Changed from present to absent
+                present_inc = -1
+                absent_inc = 1
+        else:
+            # First time marking today
+            total_inc = 1
+            if is_now_present:
+                present_inc = 1
+            else:
+                absent_inc = 1
+                
+        # Only update if there is a change
+        if present_inc != 0 or absent_inc != 0 or total_inc != 0:
+            new_present = max(0, att.get("present", 0) + present_inc)
+            new_absent = max(0, att.get("absent", 0) + absent_inc)
+            new_total = max(0, att.get("total", 0) + total_inc)
+            new_percentage = (new_present / new_total * 100) if new_total > 0 else 0.0
+            
+            bulk_ops.append(
+                UpdateOne(
+                    {"_id": subject_oid, "students.student_id": student_oid},
+                    {
+                        "$set": {
+                            "students.$.attendance.present": new_present,
+                            "students.$.attendance.absent": new_absent,
+                            "students.$.attendance.total": new_total,
+                            "students.$.attendance.percentage": new_percentage,
+                            "students.$.attendance.lastMarkedAt": att_date,
+                        }
+                    }
+                )
+            )
 
-    # Recalculate percentages for updated students
-    all_updated_oids = set(present_oids) | set(absent_oids)
-    if all_updated_oids:
-        # Refetch to get updated totals
-        updated_subj = await db.subjects.find_one({"_id": subject_oid}, {"students": 1})
-        if updated_subj and "students" in updated_subj:
-            bulk_ops = []
-            for s in updated_subj["students"]:
-                if s["student_id"] in all_updated_oids:
-                    att = s.get("attendance", {})
-                    total = att.get("total", 0)
-                    present = att.get("present", 0)
-                    percentage = (present / total * 100) if total > 0 else 0.0
-
-                    bulk_ops.append(
-                        UpdateOne(
-                            {
-                                "_id": subject_oid,
-                                "students.student_id": s["student_id"],
-                            },
-                            {
-                                "$set": {
-                                    "students.$.attendance.percentage": percentage,
-                                }
-                            },
-                        )
-                    )
-            if bulk_ops:
-                await db.subjects.bulk_write(bulk_ops)
+    if bulk_ops:
+        await db.subjects.bulk_write(bulk_ops)
 
     # --- Write daily attendance summary ---
     teacher_id = (
@@ -1106,68 +1112,55 @@ async def confirm_attendance(payload: AttendanceConfirm):
     )
 
     # --- Integration with Optimized Attendance Logs ---
-    # Log the students who are marked PRESENT
-    updated_logs_doc = None
-    if present_oids:
-        from datetime import datetime, UTC
-
-        current_time_iso = datetime.now(UTC).isoformat()
-
-        log_students = []
-        for pid in present_oids:
-            log_students.append(
-                {
-                    "studentId": pid,
-                    "scanTime": current_time_iso,
-                    "method": "Manual_or_Offline_Sync",
-                    "isProxy": False,
-                }
-            )
-
-        updated_logs_doc = await log_grouped_attendance(
-            subject_id=subject_oid,
-            date_str=today,
-            teacher_id=teacher_id,
-            students=log_students,
-        )
-
-    # Calculate daily totals from the logs if available, otherwise just use curr batch
-    # To be accurate for multiple batches (offline syncs)
-
-    total_present_today = len(present_set)
-
-    # If we have logs, we can get the true count of present students for the day
-    if updated_logs_doc and "students" in updated_logs_doc:
-        unique_present = set(str(s["studentId"]) for s in updated_logs_doc["students"])
-        total_present_today = len(unique_present)
-    else:
-        # Try fetch if logs exist but weren't updated in this call
-        # (e.g. only absent students sent)
-        existing_logs = await db.attendance_logs.find_one(
-            {"subjectId": subject_oid, "date": today}
-        )
-        if existing_logs and "students" in existing_logs:
-            unique_present = set(str(s["studentId"]) for s in existing_logs["students"])
-            total_present_today = len(unique_present)
+    # Rebuild the log students array for present students
+    log_students = []
+    current_time_iso = datetime.now(timezone.utc).isoformat()
+    
+    existing_students_map = {}
+    if existing_log and "students" in existing_log:
+        existing_students_map = {str(s["studentId"]): s for s in existing_log["students"]}
+        
+    for sid in present_set:
+        if sid in existing_students_map:
+            # Preserve existing scan details
+            log_students.append(existing_students_map[sid])
+        else:
+            # Create new scan entry
+            log_students.append({
+                "studentId": ObjectId(sid),
+                "scanTime": current_time_iso,
+                "method": "Manual_or_Offline_Sync",
+                "isProxy": False
+            })
+            
+    # Update attendance_logs collection
+    await db.attendance_logs.update_one(
+        {"subjectId": subject_oid, "date": att_date},
+        {
+            "$set": {
+                "students": log_students,
+                "teacherId": teacher_id,
+                "updatedAt": datetime.now(timezone.utc)
+            },
+            "$setOnInsert": {
+                "createdAt": datetime.now(timezone.utc)
+            }
+        },
+        upsert=True
+    )
 
     # Correctly calculate absent students based on total enrollment
-    # This fixes the issue where offline partial syncs overwrite 'absent' with 0
+    total_present_today = len(present_set)
     total_enrolled = len(subject.get("students", []))
     absent_count = max(0, total_enrolled - total_present_today)
 
     await save_daily_summary(
         subject_id=subject_oid,
         teacher_id=teacher_id,
-        record_date=today,
+        record_date=att_date,
         present=total_present_today,
         absent=absent_count,
     )
-
-    return {
-        "ok": True,
-        "present_updated": len(present_set),
-        "absent_updated": len(absent_set),
-    }
 
     return {
         "ok": True,

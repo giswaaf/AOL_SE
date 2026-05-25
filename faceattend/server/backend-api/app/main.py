@@ -11,6 +11,11 @@ from starlette.middleware.sessions import SessionMiddleware
 import socketio
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
+from fastapi.staticfiles import StaticFiles
+
+# Create uploads directory if it doesn't exist
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+os.makedirs(os.path.join(UPLOAD_DIR, "student_faces"), exist_ok=True)
 
 # Routers
 from app.api.routes.auth import router as auth_router
@@ -211,6 +216,9 @@ def create_app() -> FastAPI:
     app.include_router(reports_router, prefix="/api")
     app.include_router(schedule_router, prefix="/api")
     app.include_router(teacher_settings_router, prefix="/api")
+
+    # Serve uploaded files statically
+    app.mount("/api/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
     # Optional health check
     @app.get("/")

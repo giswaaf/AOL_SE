@@ -181,7 +181,7 @@ async def upload_image_url(
         ml_response = await ml_client.encode_face(
             image_base64=image_base64,
             validate_single=True,
-            min_face_area_ratio=0.05,
+            min_face_area_ratio=0.02,
             num_jitters=5,
         )
 
@@ -212,6 +212,10 @@ async def upload_image_url(
                     "Multiple faces detected. Please upload a photo with only your "
                     "face",
                 ),
+                "FACE_TOO_SMALL": (
+                    400,
+                    "Your face is too far away. Please move closer to the camera.",
+                ),
             }
 
             status_code, detail = error_mapping.get(
@@ -228,31 +232,30 @@ async def upload_image_url(
         logger.error(f"ML service error for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"ML service error: {str(e)}")
 
-    # 6. Upload processed image to Cloudinary with secure filename
+    # 6. Save processed image locally (replacing Cloudinary)
     try:
-        upload_result = upload(
-            processed_content,
-            folder="student_faces",
-            public_id=f"student_{user_id}_{validation_result['hash'][:8]}",
-            overwrite=True,
-            resource_type="image",
-            # Additional security options
-            invalidate=True,  # Invalidate CDN cache
-            quality="auto:good",  # Optimize quality
-            fetch_format="auto"  # Auto-optimize format
-        )
+        filename = f"student_{user_id}_{validation_result['hash'][:8]}.jpg"
+        from pathlib import Path
+        backend_root = Path(__file__).parent.parent.parent.parent
+        upload_dir = os.path.join(backend_root, "uploads", "student_faces")
+        os.makedirs(upload_dir, exist_ok=True)
+        file_path = os.path.join(upload_dir, filename)
         
-        image_url = upload_result.get("secure_url")
+        with open(file_path, "wb") as f:
+            f.write(processed_content)
+            
+        # Use relative path that will be served by StaticFiles (e.g. /api/uploads/student_faces/...)
+        image_url = f"/api/uploads/student_faces/{filename}"
         
         # Log successful upload
         logger.info(
-            f"Face image uploaded successfully for user {user_id}: "
-            f"cloudinary_id={upload_result.get('public_id')}, "
+            f"Face image saved locally for user {user_id}: "
+            f"filename={filename}, "
             f"url={image_url}"
         )
         
     except Exception as e:
-        logger.error(f"Cloudinary upload failed for user {user_id}: {e}")
+        logger.error(f"Local file save failed for user {user_id}: {e}")
         raise HTTPException(
             status_code=500, 
             detail="Image upload failed. Please try again later."
@@ -267,9 +270,9 @@ async def upload_image_url(
                     "image_url": image_url, 
                     "verified": True,
                     "last_face_update": datetime.now(timezone.utc),
-                    "face_image_hash": validation_result['hash']
+                    "face_image_hash": validation_result['hash'],
+                    "face_embeddings": [embedding],
                 },
-                "$push": {"face_embeddings": embedding},
             },
         )
         

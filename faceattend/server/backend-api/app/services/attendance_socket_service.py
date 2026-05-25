@@ -311,7 +311,7 @@ async def handle_process_frame(sid, data):
             match_resp = await ml_client.match_faces(
                 query_embedding=face["embedding"],
                 candidate_embeddings=candidate_embeddings,
-                threshold=ML_UNCERTAIN_THRESHOLD,
+                threshold=1.0 - ML_UNCERTAIN_THRESHOLD,
             )
 
             if not match_resp.get("success"):
@@ -348,7 +348,7 @@ async def handle_process_frame(sid, data):
                             "id": str(matched_student["userId"]),
                             "name": matched_student.get("name")
                             or (user_info.get("name") if user_info else "Unknown"),
-                            "roll": user_info.get("roll") if user_info else "",
+                            "roll": matched_student.get("roll") or "",
                         }
 
             is_live = face.get("is_live")

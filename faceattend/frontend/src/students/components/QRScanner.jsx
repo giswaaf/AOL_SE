@@ -19,8 +19,8 @@ export default function QRScanner({ onScanSuccess, onScanError, onClose }) {
       qrbox: { width: 250, height: 250 },
       aspectRatio: 1.0,
       rememberLastUsedCamera: true,
-      supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA],
-      // This disables the "Upload from Gallery" button as requested
+      // Removed restricted supportedScanTypes to allow file upload fallback on HTTP connections
+      showTorchButtonIfSupported: true,
       showTorchButtonIfSupported: true,
     };
 

@@ -10,6 +10,8 @@ def cosine_similarity(
     """Cosine similarity between two vectors (1 = identical, 0 = orthogonal)."""
     a_arr = np.asarray(a, dtype=np.float64)
     b_arr = np.asarray(b, dtype=np.float64)
+    if a_arr.shape != b_arr.shape:
+        return 0.0
     norm_a = np.linalg.norm(a_arr)
     norm_b = np.linalg.norm(b_arr)
     if norm_a == 0 or norm_b == 0:

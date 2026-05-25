@@ -7,8 +7,10 @@ import base64
 
 # Import the app
 from app.main import app
+from app.core.config import settings
 
 client = TestClient(app)
+client.headers = {"X-API-Key": settings.ML_API_KEY}
 
 
 # Helper to create a dummy image base64
