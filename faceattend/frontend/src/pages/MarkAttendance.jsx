@@ -232,7 +232,14 @@ export default function MarkAttendance() {
   }, [selectedSubject])
 
   const [isScanning, setIsScanning] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
   const frameInFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (!isScanning) {
+      setCameraError(null);
+    }
+  }, [isScanning]);
 
   const toggleStudentStatus = (studentId) => {
     if (attendanceSubmitted) return;
@@ -414,7 +421,7 @@ export default function MarkAttendance() {
     }
 
     try {
-      await api.post("/api/attendance/confirm", {
+      await api.post("/attendance/confirm", {
         subject_id: selectedSubject,
         date: selectedDate,
         present_students: presentStudents.map((s) => s.studentId),
@@ -546,8 +553,29 @@ export default function MarkAttendance() {
             </div>
 
             <div className="relative bg-black rounded-2xl overflow-hidden aspect-video shadow-sm group">
-              {/* Webcam Component & Placeholder */}
-              {selectedSubject && isScanning ? (
+              {/* Camera Error Overlay */}
+              {cameraError ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-[var(--bg-secondary)] z-20 p-6 text-center animate-in fade-in">
+                  <div className="max-w-md space-y-4">
+                    <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto text-red-600">
+                      <AlertCircle size={32} />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-lg font-bold text-red-600">Gagal Mengakses Kamera</h4>
+                      <p className="text-xs text-[var(--text-body)]">{cameraError}</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setCameraError(null);
+                        setIsScanning(false);
+                      }}
+                      className="px-6 py-2.5 bg-[var(--primary)] text-[var(--text-on-primary)] rounded-xl font-bold shadow-md hover:bg-[var(--primary-hover)] transition cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                  </div>
+                </div>
+              ) : selectedSubject && isScanning ? (
                 <>
                   <Webcam
                     audio={false}
@@ -558,6 +586,14 @@ export default function MarkAttendance() {
                     height={720}
                     mirrored={true}
                     className="w-full h-full object-contain"
+                    onUserMediaError={(err) => {
+                      console.error("Webcam error:", err);
+                      if (!window.isSecureContext) {
+                        setCameraError("Kamera tidak dapat diakses karena koneksi tidak aman (harus HTTPS atau localhost).");
+                      } else {
+                        setCameraError("Tidak dapat mengakses kamera. Pastikan izin kamera diberikan.");
+                      }
+                    }}
                   />
                   {/* REAL FACE OVERLAY */}
                   <FaceOverlay faces={detections} videoRef={webcamRef} mirrored={true} />

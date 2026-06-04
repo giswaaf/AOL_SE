@@ -33,3 +33,8 @@ pydantic-settings>=2.0.0
 
 # ── Opsional (untuk GPU acceleration) ───────────────────────
 # torch-cu117  # Uncomment jika ada NVIDIA GPU + CUDA 11.7
+
+# ── Face Embedding Models ───────────────────────────────────
+insightface>=0.7.3
+onnxruntime>=1.16.0
+deepface>=0.0.79

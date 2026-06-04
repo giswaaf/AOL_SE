@@ -1,27 +1,15 @@
-"""
-attendance_pipeline.py
-=======================
-INTI INTEGRASI — Menggabungkan 3 repository:
-  1. ageitgey/face_recognition  → Face encoding & matching
-  2. minivision-ai/Silent-Face-Anti-Spoofing → Anti-spoofing
-  3. nem-web/smart-attendance   → Web app & database layer
-
-Letakkan file ini di: server/ml-service/app/ml/attendance_pipeline.py
-"""
+import base64
+import logging
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
-import face_recognition
-import base64
-import logging
-from datetime import datetime
-from dataclasses import dataclass
-from typing import Optional, List, Tuple
-from pathlib import Path
 
-# Import anti-spoofing dari Silent-Face-Anti-Spoofing
-# (pastikan folder src/ sudah dicopy ke app/anti_spoof_src/)
-import sys
+# ── Anti-spoofing (unchanged) ─────────────────────────────────────────────
 sys.path.append(str(Path(__file__).parent.parent / "anti_spoof_src"))
 
 try:
@@ -37,11 +25,23 @@ except ImportError:
         "dan copy folder src/ ke app/anti_spoof_src/"
     )
 
+# ── Improved embedding + matching ────────────────────────────────────────
+from app.ml.face_encoder import get_face_embedding, get_averaged_embedding
+from app.ml.face_matcher import (
+    match_with_quality,
+    COSINE_THRESHOLD,
+    confidence_label,
+)
+from app.ml.face_detector import detect_faces
+
 logger = logging.getLogger(__name__)
 
-# ── Path ke model anti-spoofing ────────────────────────────────────────────
 ANTI_SPOOF_MODEL_DIR = Path(__file__).parent.parent.parent / "resources" / "anti_spoof_models"
 DETECTION_MODEL_DIR  = Path(__file__).parent.parent.parent / "resources" / "detection_model"
+
+# Minimum frames required for a good multi-frame enrollment
+MIN_ENROLLMENT_FRAMES = 5
+RECOMMENDED_ENROLLMENT_FRAMES = 15
 
 
 @dataclass
@@ -51,39 +51,35 @@ class AttendanceResult:
     # Anti-spoofing
     is_real_face: bool
     spoofing_confidence: float
-    spoofing_label: str          # "Real" atau "Fake"
+    spoofing_label: str
     # Face recognition
     student_id: Optional[str]
     student_name: Optional[str]
-    recognition_confidence: float  # 0-1, makin tinggi makin yakin
+    recognition_confidence: float
+    confidence_label: str = "no_match"   # NEW: "high" | "medium" | "low" | "no_match"
     # Meta
-    session_type: str            # "check_in" atau "check_out"
-    timestamp: datetime
+    session_type: str = "check_in"
+    timestamp: datetime = field(default_factory=datetime.utcnow)
     error_message: Optional[str] = None
 
 
-class AntiSpoofingChecker:
-    """
-    Wrapper untuk minivision-ai/Silent-Face-Anti-Spoofing.
-    Mendeteksi apakah wajah di frame adalah wajah nyata atau spoofing
-    (foto, layar, topeng silikon, dll).
-    """
+# ── Anti-spoofing (unchanged from original) ───────────────────────────────
 
-    def __init__(self, model_dir: Path = ANTI_SPOOF_MODEL_DIR,
-                 device_id: int = 0):
+class AntiSpoofingChecker:
+    """Wrapper for minivision-ai/Silent-Face-Anti-Spoofing."""
+
+    def __init__(self, model_dir: Path = ANTI_SPOOF_MODEL_DIR, device_id: int = 0):
         self.model_dir = model_dir
         self.device_id = device_id
         self._model = None
         self._crop_image = None
         self._available = ANTI_SPOOFING_AVAILABLE and model_dir.exists()
-
         if self._available:
             self._load_model()
         else:
             logger.warning("Anti-spoofing dinonaktifkan (model tidak tersedia).")
 
     def _load_model(self):
-        """Load model anti-spoofing."""
         try:
             self._model = AntiSpoofPredict(self.device_id)
             self._crop_image = CropImage()
@@ -93,36 +89,15 @@ class AntiSpoofingChecker:
             logger.error(f"❌ Gagal load model anti-spoofing: {e}")
 
     def check(self, image_bgr: np.ndarray) -> dict:
-        """
-        Periksa apakah wajah nyata.
-
-        Args:
-            image_bgr: Frame dari OpenCV (BGR format)
-
-        Returns:
-            dict: {
-                "is_real": bool,
-                "confidence": float (0-1),
-                "label": "Real" | "Fake" | "Unknown"
-            }
-        """
         if not self._available:
-            # Jika modul tidak tersedia, anggap real (fallback)
-            logger.warning("Anti-spoofing tidak tersedia, skip check.")
             return {"is_real": True, "confidence": 1.0, "label": "Unknown (bypass)"}
 
         try:
-            image_cropper = self._crop_image
-            model_test = self._model
-
-            # Resize untuk model
-            image_bbox = model_test.get_bbox(image_bgr)
+            image_bbox = self._model.get_bbox(image_bgr)
             if image_bbox is None:
                 return {"is_real": False, "confidence": 0.0, "label": "No Face Detected"}
 
             prediction = np.zeros((1, 3))
-
-            # Multi-scale test (dari Silent-Face-Anti-Spoofing/test.py)
             for model_name in self.model_dir.iterdir():
                 if not model_name.name.endswith(".pkl"):
                     continue
@@ -133,21 +108,18 @@ class AntiSpoofingChecker:
                     "scale": scale,
                     "out_w": w_input,
                     "out_h": h_input,
-                    "crop": True if scale is None else False,
+                    "crop": scale is None,
                 }
-                img = image_cropper.crop(**param)
-                prediction += model_test.predict(img, str(model_name))
+                img = self._crop_image.crop(**param)
+                prediction += self._model.predict(img, str(model_name))
 
-            # Interpretasi hasil
             label = np.argmax(prediction)
-            # label 1 = Real, label 0 = Fake
             is_real = (label == 1)
             confidence = float(prediction[0][label] / prediction.sum())
-
             return {
                 "is_real": bool(is_real),
                 "confidence": round(confidence, 4),
-                "label": "Real" if is_real else "Fake"
+                "label": "Real" if is_real else "Fake",
             }
 
         except Exception as e:
@@ -155,95 +127,132 @@ class AntiSpoofingChecker:
             return {"is_real": False, "confidence": 0.0, "label": f"Error: {str(e)}"}
 
 
+# ── Improved FaceRecognizer ───────────────────────────────────────────────
+
 class FaceRecognizer:
     """
-    Wrapper untuk ageitgey/face_recognition.
-    Encode wajah dan bandingkan dengan database encoding.
+    Improved face recognizer using ArcFace embeddings (512-dim) instead of
+    the old dlib-based HOG pipeline.
+
+    Key differences:
+    - encode_face() uses InsightFace ArcFace → 512-dim vector
+    - match_face() uses vectorised cosine similarity with quality tiers
+    - Supports averaged embeddings from multiple enrollment frames
     """
 
-    # Threshold jarak wajah (lebih kecil = lebih ketat)
-    TOLERANCE = 0.55
+    def _crop_face_from_image(self, image_rgb: np.ndarray) -> Optional[np.ndarray]:
+        """Detect and crop the largest face from an image."""
+        faces = detect_faces(image_rgb)
+        if not faces:
+            return None
+
+        # Pick largest face by area
+        best = max(faces, key=lambda f: (f[2] - f[0]) * (f[1] - f[3]))
+        top, right, bottom, left = best
+
+        # Safety clamp
+        h, w = image_rgb.shape[:2]
+        top    = max(0, top)
+        left   = max(0, left)
+        bottom = min(h, bottom)
+        right  = min(w, right)
+
+        if bottom <= top or right <= left:
+            return None
+
+        return image_rgb[top:bottom, left:right]
 
     def encode_face(self, image_rgb: np.ndarray) -> Optional[np.ndarray]:
         """
-        Encode wajah dari gambar menjadi 128-dim vector.
-
-        Args:
-            image_rgb: Gambar RGB (numpy array)
-
-        Returns:
-            np.ndarray (128,) atau None jika tidak ada wajah terdeteksi
+        Encode a single image to a 512-dim ArcFace embedding.
+        Returns np.ndarray or None if no face found.
         """
-        face_locations = face_recognition.face_locations(image_rgb, model="hog")
-        if not face_locations:
-            logger.debug("Tidak ada wajah terdeteksi dalam gambar.")
+        crop = self._crop_face_from_image(image_rgb)
+        if crop is None:
+            logger.debug("No face detected for encoding.")
             return None
 
-        encodings = face_recognition.face_encodings(image_rgb, face_locations)
-        if not encodings:
+        try:
+            # face_encoder.py expects BGR input; crop is RGB — convert
+            bgr_crop = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+            emb = get_face_embedding(bgr_crop)
+            return np.array(emb, dtype=np.float32)
+        except Exception as e:
+            logger.error(f"Encoding error: {e}")
             return None
 
-        # Ambil encoding wajah pertama (terbesar) saja
-        return encodings[0]
+    def encode_faces_multi(
+        self, images_rgb: List[np.ndarray]
+    ) -> Optional[np.ndarray]:
+        """
+        Generate an averaged embedding from multiple images (multi-frame enrollment).
+        Returns a single 512-dim vector representing the student's face centroid.
+        """
+        crops = []
+        for img in images_rgb:
+            crop = self._crop_face_from_image(img)
+            if crop is not None:
+                crops.append(cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+
+        if len(crops) < MIN_ENROLLMENT_FRAMES:
+            logger.warning(
+                f"Only {len(crops)} valid face crops out of {len(images_rgb)} frames. "
+                f"Minimum recommended: {MIN_ENROLLMENT_FRAMES}."
+            )
+
+        if not crops:
+            return None
+
+        try:
+            emb = get_averaged_embedding(crops)
+            return np.array(emb, dtype=np.float32)
+        except Exception as e:
+            logger.error(f"Multi-frame encoding error: {e}")
+            return None
 
     def match_face(
         self,
         unknown_encoding: np.ndarray,
-        known_encodings: List[Tuple[str, str, np.ndarray]]
+        known_encodings: List[Tuple[str, str, np.ndarray]],
     ) -> Tuple[Optional[str], Optional[str], float]:
         """
-        Cocokkan encoding wajah dengan database.
-
-        Args:
-            unknown_encoding: 128-dim vector wajah yang difoto
-            known_encodings: List of (student_id, student_name, encoding)
-
-        Returns:
-            Tuple: (student_id, student_name, confidence)
-                   student_id = None jika tidak cocok
+        Match against database using vectorised cosine similarity.
+        Returns (student_id, name, confidence). student_id=None if no match.
         """
         if not known_encodings:
             return None, None, 0.0
 
-        ids      = [e[0] for e in known_encodings]
-        names    = [e[1] for e in known_encodings]
-        encodings = [e[2] for e in known_encodings]
-
-        # Hitung jarak ke semua encoding yang diketahui
-        distances = face_recognition.face_distance(encodings, unknown_encoding)
-        best_idx  = int(np.argmin(distances))
-        best_dist = float(distances[best_idx])
-
-        if best_dist > self.TOLERANCE:
-            logger.info(f"Wajah tidak cocok (jarak terbaik: {best_dist:.3f})")
-            return None, None, 0.0
-
-        # Konversi jarak ke confidence (0-1, makin tinggi makin yakin)
-        confidence = round(1.0 - best_dist, 4)
-        logger.info(
-            f"✅ Match: {names[best_idx]} (confidence: {confidence:.2%})"
+        student_id, name, score, conf_label = match_with_quality(
+            unknown_encoding, known_encodings, threshold=COSINE_THRESHOLD
         )
-        return ids[best_idx], names[best_idx], confidence
 
+        if student_id:
+            logger.info(f"✅ Match: {name} (score: {score:.3f}, tier: {conf_label})")
+        else:
+            logger.info(f"No match (best score: {score:.3f})")
+
+        return student_id, name, score
+
+
+# ── Main Pipeline ─────────────────────────────────────────────────────────
 
 class AttendancePipeline:
     """
-    Pipeline utama yang menggabungkan ketiga komponen:
-      1. AntiSpoofingChecker  (Silent-Face-Anti-Spoofing)
-      2. FaceRecognizer       (face_recognition)
-      3. Hasil dikirim ke Backend API untuk disimpan ke MongoDB
+    Pipeline utama:
+      1. Anti-spoofing (Silent-Face)
+      2. Face recognition (ArcFace 512-dim via InsightFace)
+      3. Return AttendanceResult
     """
 
-    # Threshold minimum confidence anti-spoofing untuk dianggap "real"
     SPOOFING_THRESHOLD = 0.6
 
     def __init__(self):
-        self.anti_spoof  = AntiSpoofingChecker()
-        self.recognizer  = FaceRecognizer()
-        logger.info("🚀 AttendancePipeline siap.")
+        self.anti_spoof = AntiSpoofingChecker()
+        self.recognizer = FaceRecognizer()
+        logger.info("🚀 AttendancePipeline (ArcFace) siap.")
 
     def decode_image(self, image_b64: str) -> np.ndarray:
-        """Decode base64 image string menjadi numpy array BGR."""
+        """Decode base64 image → BGR numpy array."""
         img_bytes = base64.b64decode(image_b64.split(",")[-1])
         img_array = np.frombuffer(img_bytes, dtype=np.uint8)
         image_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
@@ -255,22 +264,12 @@ class AttendancePipeline:
         self,
         image_b64: str,
         known_encodings: List[Tuple[str, str, np.ndarray]],
-        session_type: str = "check_in"
+        session_type: str = "check_in",
     ) -> AttendanceResult:
-        """
-        Proses absensi lengkap dari foto base64.
-
-        Args:
-            image_b64: Foto dari webcam (base64 string)
-            known_encodings: Database encoding siswa [(id, name, encoding), ...]
-            session_type: "check_in" atau "check_out"
-
-        Returns:
-            AttendanceResult lengkap
-        """
+        """Full attendance pipeline from a single base64 image."""
         timestamp = datetime.utcnow()
 
-        # ── Step 0: Decode gambar ──────────────────────────────────────────
+        # Step 0: Decode
         try:
             image_bgr = self.decode_image(image_b64)
         except ValueError as e:
@@ -283,39 +282,41 @@ class AttendancePipeline:
 
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-        # ── Step 1: Anti-Spoofing ──────────────────────────────────────────
+        # Step 1: Anti-spoofing
         spoof_result = self.anti_spoof.check(image_bgr)
-        is_real      = spoof_result["is_real"]
-        spoof_conf   = spoof_result["confidence"]
-        spoof_label  = spoof_result["label"]
+        is_real    = spoof_result["is_real"]
+        spoof_conf = spoof_result["confidence"]
+        spoof_label = spoof_result["label"]
 
         logger.info(f"[Anti-Spoofing] {spoof_label} (conf: {spoof_conf:.2%})")
 
         if not is_real and spoof_conf > self.SPOOFING_THRESHOLD:
-            # Wajah palsu terdeteksi — tolak absensi
             return AttendanceResult(
                 success=False, is_real_face=False,
                 spoofing_confidence=spoof_conf, spoofing_label=spoof_label,
                 student_id=None, student_name=None, recognition_confidence=0,
+                confidence_label="no_match",
                 session_type=session_type, timestamp=timestamp,
-                error_message="Spoofing terdeteksi: wajah tidak nyata."
+                error_message="Spoofing terdeteksi: wajah tidak nyata.",
             )
 
-        # ── Step 2: Face Encoding ──────────────────────────────────────────
+        # Step 2: Encode
         encoding = self.recognizer.encode_face(image_rgb)
         if encoding is None:
             return AttendanceResult(
                 success=False, is_real_face=True,
                 spoofing_confidence=spoof_conf, spoofing_label=spoof_label,
                 student_id=None, student_name=None, recognition_confidence=0,
+                confidence_label="no_match",
                 session_type=session_type, timestamp=timestamp,
-                error_message="Tidak ada wajah terdeteksi dalam frame."
+                error_message="Tidak ada wajah terdeteksi dalam frame.",
             )
 
-        # ── Step 3: Face Matching ──────────────────────────────────────────
+        # Step 3: Match
         student_id, student_name, recog_conf = self.recognizer.match_face(
             encoding, known_encodings
         )
+        conf_tier = confidence_label(recog_conf) if student_id else "no_match"
 
         if student_id is None:
             return AttendanceResult(
@@ -323,45 +324,76 @@ class AttendancePipeline:
                 spoofing_confidence=spoof_conf, spoofing_label=spoof_label,
                 student_id=None, student_name=None,
                 recognition_confidence=recog_conf,
+                confidence_label=conf_tier,
                 session_type=session_type, timestamp=timestamp,
-                error_message="Wajah tidak dikenali dalam database."
+                error_message="Wajah tidak dikenali dalam database.",
             )
 
-        # ── Step 4: Sukses ─────────────────────────────────────────────────
         logger.info(
-            f"✅ Absensi berhasil: {student_name} | "
-            f"Sesi: {session_type} | Waktu: {timestamp}"
+            f"✅ Absensi berhasil: {student_name} | Sesi: {session_type} | "
+            f"Confidence: {recog_conf:.2%} ({conf_tier})"
         )
         return AttendanceResult(
             success=True, is_real_face=True,
             spoofing_confidence=spoof_conf, spoofing_label=spoof_label,
             student_id=student_id, student_name=student_name,
             recognition_confidence=recog_conf,
-            session_type=session_type, timestamp=timestamp
+            confidence_label=conf_tier,
+            session_type=session_type, timestamp=timestamp,
         )
 
     def register_student_face(self, image_b64: str) -> Optional[np.ndarray]:
         """
-        Encode wajah siswa baru untuk disimpan ke database.
-
-        Args:
-            image_b64: Foto wajah siswa (base64)
-
-        Returns:
-            np.ndarray (128,) encoding, atau None jika gagal
+        Single-image registration (backward compat).
+        Prefer register_student_face_from_frames() for better accuracy.
         """
         try:
             image_bgr = self.decode_image(image_b64)
             image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             encoding  = self.recognizer.encode_face(image_rgb)
-
             if encoding is None:
                 logger.warning("Gagal encode wajah saat registrasi.")
                 return None
-
-            logger.info("✅ Wajah siswa berhasil di-encode untuk registrasi.")
+            logger.info("✅ Single-image face encoded for registration.")
             return encoding
-
         except Exception as e:
             logger.error(f"Error saat registrasi wajah: {e}")
             return None
+
+    def register_student_face_from_frames(
+        self, frames_b64: List[str]
+    ) -> Optional[np.ndarray]:
+        """
+        Multi-frame registration from a live video enrollment session.
+
+        Accepts 5–30 base64 frames captured during a head-turn sequence
+        (front → left → right → front). Produces an averaged ArcFace embedding
+        that is significantly more robust than a single still photo.
+
+        Returns 512-dim np.ndarray or None on failure.
+        """
+        if not frames_b64:
+            logger.error("No frames provided for multi-frame registration.")
+            return None
+
+        images_rgb = []
+        for i, b64 in enumerate(frames_b64):
+            try:
+                bgr = self.decode_image(b64)
+                images_rgb.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            except Exception as e:
+                logger.warning(f"Skipping frame {i}: {e}")
+
+        if not images_rgb:
+            logger.error("All frames failed to decode.")
+            return None
+
+        encoding = self.recognizer.encode_faces_multi(images_rgb)
+        if encoding is None:
+            logger.warning("Multi-frame encoding failed — no valid face crops.")
+            return None
+
+        logger.info(
+            f"✅ Multi-frame enrollment: averaged from {len(images_rgb)} frames."
+        )
+        return encoding

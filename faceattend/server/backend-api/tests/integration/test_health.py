@@ -12,5 +12,5 @@ async def test_root_404(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_docs(client: AsyncClient):
     # Docs should be available
-    response = await client.get("/docs")
+    response = await client.get("http://test/docs")
     assert response.status_code == 200

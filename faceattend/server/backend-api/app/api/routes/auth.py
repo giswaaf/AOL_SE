@@ -224,9 +224,40 @@ async def login(request: Request, response: Response, payload: LoginRequest):
 
     update_trusted_device = False
 
-    # 5. BYPASS DEVICE BINDING OTP - Always update trusted device for students
+    # 5. DEVICE BINDING WITH 5-HOUR COOLDOWN CHECK - ONLY FOR STUDENTS
     if user["role"] == "student":
-        update_trusted_device = True
+        trusted_device_id = user.get("trusted_device_id")
+
+        if not trusted_device_id:
+            # Condition 1: First login ever -> Allow & Bind
+            update_trusted_device = True
+
+        elif trusted_device_id != device_id:
+            # Condition 3: Mismatch! Check the 5-hour cooldown
+            last_logout_time = user.get("last_logout_time")
+
+            if last_logout_time:
+                # Ensure timezone awareness for comparison
+                if last_logout_time.tzinfo is None:
+                    last_logout_time = last_logout_time.replace(tzinfo=timezone.utc)
+
+                time_since_logout = datetime.now(timezone.utc) - last_logout_time
+
+                # If they logged out less than 5 hours ago -> Trigger OTP Modal
+                if time_since_logout < timedelta(hours=5):
+                    # We pass the newly generated/provided device_id in the error detail
+                    # so the frontend knows which device ID to request the OTP for.
+                    raise HTTPException(
+                        status_code=403,
+                        detail={
+                            "message": "DEVICE_BINDING_REQUIRED",
+                            "device_id": device_id,
+                        },
+                    )
+
+            # If we get here: They logged out > 5 hours ago or never logged out.
+            # Bypass OTP and mark the new device to be updated.
+            update_trusted_device = True
 
     # 6. Generate session ID and tokens
     session_id = generate_session_id()

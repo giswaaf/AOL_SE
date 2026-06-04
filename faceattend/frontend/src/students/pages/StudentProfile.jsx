@@ -1,9 +1,9 @@
 import React, { useState, useRef, useCallback } from "react";
-import Webcam from "react-webcam";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchMyStudentProfile } from "../../api/auth.js";
 import { logout } from "../../api/auth.js";
 import LogoutConfirmDialog from "../../components/LogoutConfirmDialog.jsx";
+import FaceLivenessEnrollment from "../components/FaceLivenessEnrollment";
 import {
   fetchAvailableSubjects,
   addSubjectToStudent,
@@ -39,21 +39,6 @@ export default function StudentProfile() {
   const { theme, setTheme } = useTheme();
   const [isLogoutOpen, setLogoutOpen] = useState(false);
   const [registeringDevice, setRegisteringDevice] = useState(false);
-  const [showWebcam, setShowWebcam] = useState(false);
-  const webcamRef = useRef(null);
-
-  const captureFace = useCallback(() => {
-    const imageSrc = webcamRef.current?.getScreenshot();
-    if (imageSrc) {
-      fetch(imageSrc)
-        .then(res => res.blob())
-        .then(blob => {
-          const file = new File([blob], "face_capture.jpg", { type: "image/jpeg" });
-          uploadMutation.mutate(file);
-          setShowWebcam(false);
-        });
-    }
-  }, [webcamRef]);
 
   const changeLanguage = (lng) => {
     i18n.changeLanguage(lng);
@@ -414,62 +399,11 @@ export default function StudentProfile() {
             </div>
 
             {/* Card 2: Face Image Upload */}
-            <div className="bg-[var(--bg-card)] rounded-2xl border border-[var(--border-color)] shadow-sm p-6 space-y-4">
-              <div className="flex justify-between items-start">
-                <div>
-                  <h4 className="text-base font-bold text-[var(--text-main)]">
-                    {t("profile.face_image.title")}
-                  </h4>
-                  <p className="text-xs text-[var(--text-body)]/80 mt-1 max-w-md leading-relaxed">
-                    {t("profile.face_image.desc")}
-                  </p>
-                </div>
-                {img ? (
-                  <div className="flex flex-col items-center gap-2">
-                    <img
-                      src={img}
-                      alt="Face preview"
-                      className="w-20 h-20 object-cover border border-[var(--border-color)] shadow-sm rounded-md"
-                    />
-
-                    <div className="flex gap-3 mt-1">
-                      <button
-                        onClick={() => setShowWebcam(true)}
-                        className="text-xs font-medium text-[var(--primary)] underline hover:text-[var(--primary-hover)] cursor-pointer"
-                      >
-                        Capture New
-                      </button>
-                      <button
-                        onClick={() => fileRef.current.click()}
-                        className="text-xs font-medium text-[var(--text-body)] underline hover:text-[var(--text-main)] cursor-pointer"
-                      >
-                        Upload
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-2">
-                    <button
-                      onClick={() => setShowWebcam(true)}
-                      className="flex justify-center items-center gap-2 px-4 py-2 bg-[var(--primary)] text-white rounded-xl text-xs font-bold uppercase tracking-wide hover:opacity-90 transition shadow-sm active:scale-95 cursor-pointer"
-                    >
-                      <Camera size={14} />
-                      Capture Live
-                    </button>
-                    <button
-                      onClick={() => fileRef.current.click()}
-                      className="flex justify-center items-center gap-2 px-4 py-2 border border-[var(--border-color)] rounded-xl text-xs font-bold uppercase tracking-wide hover:bg-[var(--bg-secondary)] transition shadow-sm active:scale-95 text-[var(--text-body)] cursor-pointer"
-                    >
-                      <Upload size={14} />
-                      Upload File
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="bg-[var(--bg-primary)] text-[var(--text-body)]/80 text-[10px] px-3 py-2 rounded-lg inline-block font-medium border border-[var(--border-color)]">
-                {t("profile.face_image.tips")}
-              </div>
-            </div>
+            <FaceLivenessEnrollment
+              studentId={data.id}
+              token={localStorage.getItem("token")}
+              onSuccess={() => queryClient.invalidateQueries(["myStudentProfile"])}
+            />
 
             {/* Card 3: Attendance Summary (Weighted) */}
             <div className="bg-[var(--bg-card)] rounded-2xl border border-[var(--border-color)] shadow-sm p-6 space-y-6">
@@ -658,46 +592,6 @@ export default function StudentProfile() {
   }}
 />
 
-            {/* Webcam Modal */}
-            {showWebcam && (
-              <div className="fixed inset-0 bg-[var(--overlay)] flex items-center justify-center z-[60] p-4">
-                <div className="bg-[var(--bg-card)] rounded-2xl p-6 space-y-4 border border-[var(--border-color)] shadow-2xl max-w-md w-full relative">
-                  <div className="flex justify-between items-center mb-2">
-                    <h3 className="font-bold text-lg text-[var(--text-main)]">Capture Face Image</h3>
-                    <button onClick={() => setShowWebcam(false)} className="text-[var(--text-body)] hover:text-[var(--danger)]">
-                      <X size={20} />
-                    </button>
-                  </div>
-                  <div className="rounded-xl overflow-hidden border border-[var(--border-color)] bg-black relative">
-                    <Webcam
-                      audio={false}
-                      ref={webcamRef}
-                      screenshotFormat="image/jpeg"
-                      className="w-full h-auto aspect-square object-cover"
-                      videoConstraints={{ facingMode: "user" }}
-                      mirrored={true}
-                    />
-                  </div>
-                  <p className="text-xs text-center text-[var(--text-body)]">Make sure your face is clearly visible and well-lit.</p>
-                  <button
-                    onClick={captureFace}
-                    disabled={uploadMutation.isPending}
-                    className="w-full bg-[var(--primary)] text-white font-bold py-3 rounded-xl flex justify-center items-center gap-2 hover:opacity-90 transition active:scale-95"
-                  >
-                    {uploadMutation.isPending ? (
-                      <>
-                         <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                         Processing...
-                      </>
-                    ) : (
-                      <>
-                         <Camera size={18} /> Take Photo
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
              
           </div>
         )}

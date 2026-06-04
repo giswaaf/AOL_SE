@@ -841,6 +841,8 @@ async def mark_attendance(request: Request, response: Response, payload: Dict):
             )
 
         detected_faces = ml_response.get("faces", [])
+        dims = ml_response.get("metadata", {}).get("image_dimensions") or [826, 464]
+        frame_width, frame_height = dims[0], dims[1]
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to detect faces: {str(e)}")
@@ -862,12 +864,14 @@ async def mark_attendance(request: Request, response: Response, payload: Dict):
     # Prepare candidate embeddings for batch matching
     candidate_embeddings = []
     for student in students:
-        candidate_embeddings.append(
-            {
-                "student_id": str(student["userId"]),
-                "embeddings": student["face_embeddings"],
-            }
-        )
+        valid_embs = [emb for emb in student.get("face_embeddings", []) if isinstance(emb, list) and len(emb) == 512]
+        if valid_embs:
+            candidate_embeddings.append(
+                {
+                    "student_id": str(student["userId"]),
+                    "embeddings": valid_embs,
+                }
+            )
 
     # Call ML service to match faces
     try:
@@ -944,10 +948,10 @@ async def mark_attendance(request: Request, response: Response, payload: Dict):
         results.append(
             {
                 "box": {
-                    "top": location.get("top"),
-                    "right": location.get("right"),
-                    "bottom": location.get("bottom"),
-                    "left": location.get("left"),
+                    "top": location.get("top") / frame_height,
+                    "right": location.get("right") / frame_width,
+                    "bottom": location.get("bottom") / frame_height,
+                    "left": location.get("left") / frame_width,
                 },
                 "status": status,
                 "distance": None if not best_match else round(distance, 4),
@@ -1167,3 +1171,131 @@ async def confirm_attendance(payload: AttendanceConfirm):
         "present_updated": len(present_set),
         "absent_updated": len(absent_set),
     }
+
+
+from pydantic import BaseModel
+
+class AttendanceRecordRequest(BaseModel):
+    student_id: str
+    subject_id: str
+    session_type: str
+    timestamp: str
+    confidence: float
+    confidence_label: str
+
+@router.post("/record")
+async def record_attendance(payload: AttendanceRecordRequest):
+    """
+    Record attendance from face recognition service.
+    """
+    student_id_str = payload.student_id
+    subject_id_str = payload.subject_id
+    session_type = payload.session_type
+    timestamp_str = payload.timestamp
+    confidence = payload.confidence
+    confidence_label = payload.confidence_label
+
+    try:
+        student_oid = ObjectId(student_id_str)
+        subject_oid = ObjectId(subject_id_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid student_id or subject_id")
+
+    # Get date from timestamp
+    try:
+        dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        record_date = dt.date().isoformat()
+    except Exception:
+        record_date = date.today().isoformat()
+
+    # 1. Fetch Subject to verify enrollment and get info
+    subject = await db.subjects.find_one({"_id": subject_oid})
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found")
+
+    # 2. Check if student has already marked attendance today
+    existing_subject = await db.subjects.find_one(
+        {
+            "_id": subject_oid,
+            "students": {
+                "$elemMatch": {
+                    "student_id": student_oid,
+                    "attendance.lastMarkedAt": record_date,
+                }
+            },
+        }
+    )
+
+    if existing_subject:
+        return {"success": True, "message": "Attendance already marked for today"}
+
+    # 3. Update the student's attendance in the subject document
+    attendance_record = {
+        "date": record_date,
+        "status": "Present",
+        "timestamp": timestamp_str,
+        "method": "face",
+        "confidence": confidence,
+        "confidence_label": confidence_label,
+    }
+
+    update_query = {
+        "$push": {"students.$.attendanceRecords": attendance_record},
+        "$inc": {
+            "students.$.attendance.total": 1,
+            "students.$.attendance.present": 1,
+        },
+        "$set": {"students.$.attendance.lastMarkedAt": record_date},
+    }
+
+    result = await db.subjects.update_one(
+        {"_id": subject_oid, "students.student_id": student_oid},
+        update_query,
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Student not enrolled in this subject or already marked",
+        )
+
+    # 4. Save audit log in attendance_logs
+    await log_grouped_attendance(
+        subject_id=subject_oid,
+        date_str=record_date,
+        students=[
+            {
+                "studentId": student_oid,
+                "scanTime": timestamp_str,
+                "method": "face",
+                "confidence": confidence,
+                "confidence_label": confidence_label,
+            }
+        ],
+        teacher_id=subject.get("professor_ids", [None])[0]
+    )
+
+    # 5. Emit socket event if teacher has an active session
+    # Find student info for socket event
+    student_info = await db.students.find_one({"userId": student_oid})
+    student_name = student_info.get("name", "Unknown") if student_info else "Unknown"
+    student_roll = student_info.get("roll", "") if student_info else ""
+
+    # Emit to teacher's room
+    await sio.emit(
+        "student_scanned",
+        {
+            "student": {
+                "name": student_name,
+                "roll": student_roll,
+                "id": str(student_oid),
+            },
+            "timestamp": timestamp_str,
+            "method": "face",
+            "confidence": confidence,
+            "confidence_label": confidence_label,
+        }
+    )
+
+    return {"success": True, "message": "Attendance recorded successfully"}
+

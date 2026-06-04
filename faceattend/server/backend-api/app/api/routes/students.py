@@ -881,3 +881,81 @@ async def export_student_roster_pdf(
             media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+
+from pydantic import BaseModel
+
+class SaveEncodingRequest(BaseModel):
+    face_encoding: list[float]
+
+@router.get("/encodings")
+async def get_student_encodings(subject_id: str):
+    """
+    Fetch face encodings for all students enrolled in a subject.
+    """
+    try:
+        subject_oid = ObjectId(subject_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid subject ID")
+
+    subject = await db["subjects"].find_one({"_id": subject_oid})
+    if not subject:
+        return []
+
+    # Get student userIds enrolled in this subject
+    student_user_ids = [s["student_id"] for s in subject.get("students", [])]
+
+    if not student_user_ids:
+        return []
+
+    # Fetch students details
+    students_cursor = db["students"].find(
+        {"userId": {"$in": student_user_ids}, "face_embeddings": {"$exists": True, "$ne": []}}
+    )
+    users_cursor = db["users"].find({"_id": {"$in": student_user_ids}})
+
+    students_map = {str(s["userId"]): s async for s in students_cursor}
+    users_map = {str(u["_id"]): u async for u in users_cursor}
+
+    results = []
+    for uid in student_user_ids:
+        uid_str = str(uid)
+        if uid_str in students_map and uid_str in users_map:
+            student_doc = students_map[uid_str]
+            user_doc = users_map[uid_str]
+            embeddings = student_doc.get("face_embeddings", [])
+            if embeddings:
+                results.append({
+                    "_id": uid_str,
+                    "name": user_doc.get("name", "Unknown"),
+                    "face_encoding": embeddings[0]
+                })
+
+    return results
+
+@router.put("/{student_id}/encoding")
+async def save_student_encoding(student_id: str, payload: SaveEncodingRequest):
+    """
+    Save student's face encoding (embedding).
+    """
+    try:
+        student_oid = ObjectId(student_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid student ID")
+
+    student = await db["students"].find_one({"_id": student_oid})
+    if not student:
+        raise HTTPException(status_code=404, detail="Student profile not found")
+
+    await db["students"].update_one(
+        {"_id": student_oid},
+        {
+            "$set": {
+                "face_embeddings": [payload.face_encoding],
+                "verified": True,
+                "last_face_update": datetime.now(timezone.utc),
+            }
+        }
+    )
+    return {"success": True, "message": "Face encoding saved successfully"}
+

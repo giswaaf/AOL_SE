@@ -2,15 +2,25 @@ from app.db.mongo import db
 from bson import ObjectId
 
 
-async def get_student_profile(user_id: str):
-    # 1. Get user document
-    user = await db["users"].find_one({"_id": ObjectId(user_id)})
-    if not user:
+async def get_student_profile(identifier: str):
+    # Try finding student by student _id or userId
+    try:
+        obj_id = ObjectId(identifier)
+    except Exception:
         return None
 
-    # 2. Get student document
-    student = await db["students"].find_one({"userId": ObjectId(user_id)})
+    student = await db["students"].find_one({
+        "$or": [
+            {"_id": obj_id},
+            {"userId": obj_id}
+        ]
+    })
     if not student:
+        return None
+
+    # Get user document using student["userId"]
+    user = await db["users"].find_one({"_id": student["userId"]})
+    if not user:
         return None
 
     # 3. Attendance summary
