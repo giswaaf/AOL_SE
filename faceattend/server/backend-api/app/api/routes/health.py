@@ -20,9 +20,13 @@ async def check_database():
 
 async def check_ml_service():
     ml_url = os.getenv("ML_SERVICE_URL", "http://localhost:8001")
+    ml_api_key = os.getenv("ML_API_KEY", "")
     try:
         async with httpx.AsyncClient(timeout=3.0) as http_client:
-            response = await http_client.get(f"{ml_url}/health")
+            response = await http_client.get(
+                f"{ml_url}/health",
+                headers={"X-API-Key": ml_api_key}
+            )
             if response.status_code == 200:
                 return {"status": "healthy", "healthy": True}
             return {

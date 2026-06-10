@@ -3,6 +3,7 @@ Tests for image validation in ML service
 """
 
 import base64
+import numpy as np
 from io import BytesIO
 from PIL import Image
 

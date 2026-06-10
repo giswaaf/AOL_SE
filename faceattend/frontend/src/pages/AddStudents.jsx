@@ -49,11 +49,11 @@ export default function AddStudents() {
       return true;
     })
     .map((s) => {
-      const hasAvatar = s.avatar && s.avatar.trim() !== '';
+      const hasFaceRegistered = (s.avatar && s.avatar.trim() !== "") || (s.embeddings && s.embeddings.length > 0);
       let status;
       if (s.verified) {
         status = 'verified';
-      } else if (hasAvatar) {
+      } else if (hasFaceRegistered) {
         status = 'ready_to_verify';
       } else {
         status = 'waiting_image';
@@ -68,7 +68,7 @@ export default function AddStudents() {
         status: status,
         addedTime: t('add_students.added_time', { time: "Just now", defaultValue: "Just now" }),
         avatar: s.avatar,
-        hasImage: hasAvatar,
+        hasImage: hasFaceRegistered,
         verified: s.verified
       };
     });
@@ -261,7 +261,13 @@ export default function AddStudents() {
                     <td className="px-6 py-4 text-sm font-medium text-[var(--text-body)]">{student.roll}</td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-3">
-                        <img src={student.avatar} alt={student.name} className="w-10 h-10 rounded-full bg-[var(--bg-secondary)]" />
+                        {student.avatar ? (
+                          <img src={student.avatar} alt={student.name} className="w-10 h-10 rounded-full bg-[var(--bg-secondary)] object-cover" />
+                        ) : (
+                          <div className="w-10 h-10 rounded-full bg-[var(--bg-secondary)] flex items-center justify-center text-[var(--text-body)]">
+                            <User size={20} />
+                          </div>
+                        )}
                         <div>
                           <div className="font-semibold text-[var(--text-main)]">{student.name}</div>
                           <div className="text-xs text-[var(--text-body)] opacity-70">Added {student.addedTime}</div>

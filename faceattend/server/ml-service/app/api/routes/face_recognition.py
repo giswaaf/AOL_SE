@@ -54,9 +54,6 @@ async def encode_face(request: EncodeFaceRequest):
                 success=False, error=error_msg, error_code=error_code
             )
 
-        # Convert PIL image to numpy array
-        image_np = np.array(image)
-
         faces = detect_faces(image_np)
 
         if not faces:
@@ -115,9 +112,6 @@ async def detect_faces_api(request: DetectFacesRequest):
 
         if not success:
             return DetectFacesResponse(success=False, error=error_msg)
-
-        # Convert PIL image to numpy array
-        image_np = np.array(image)
 
         faces = detect_faces(image_np)
         h, w, _ = image_np.shape

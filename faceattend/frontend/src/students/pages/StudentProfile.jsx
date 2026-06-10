@@ -1,8 +1,9 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchMyStudentProfile } from "../../api/auth.js";
 import { logout } from "../../api/auth.js";
 import LogoutConfirmDialog from "../../components/LogoutConfirmDialog.jsx";
+import FaceLivenessEnrollment from "../components/FaceLivenessEnrollment";
 import {
   fetchAvailableSubjects,
   addSubjectToStudent,
@@ -18,7 +19,8 @@ import {
   Camera,
   Edit2,
   LogOut,
-  Fingerprint
+  Fingerprint,
+  X
 } from "lucide-react";
 import StudentNavigation from "../components/StudentNavigation";
 import ProfileSkeleton from "../components/ProfileSkeleton";
@@ -81,11 +83,14 @@ export default function StudentProfile() {
     mutationFn: uploadFaceImage,
     onSuccess: () => {
       queryClient.invalidateQueries(["myStudentProfile"]);
-      // Reset file input to allow selecting the same file again
+      toast.success("Face image registered successfully!");
       if (fileRef.current) {
         fileRef.current.value = "";
       }
     },
+    onError: (err) => {
+      toast.error(err.response?.data?.detail || "Upload failed. Please try again.");
+    }
   });
 
   const addSubjectMutation = useMutation({
@@ -394,45 +399,11 @@ export default function StudentProfile() {
             </div>
 
             {/* Card 2: Face Image Upload */}
-            <div className="bg-[var(--bg-card)] rounded-2xl border border-[var(--border-color)] shadow-sm p-6 space-y-4">
-              <div className="flex justify-between items-start">
-                <div>
-                  <h4 className="text-base font-bold text-[var(--text-main)]">
-                    {t("profile.face_image.title")}
-                  </h4>
-                  <p className="text-xs text-[var(--text-body)]/80 mt-1 max-w-md leading-relaxed">
-                    {t("profile.face_image.desc")}
-                  </p>
-                </div>
-                {img ? (
-                  <div className="flex flex-col items-center">
-                    <img
-                      src={img}
-                      alt="Face preview"
-                      className="w-20 h-20 object-cover border border-[var(--border-color)] shadow-sm rounded-md"
-                    />
-
-                    <button
-                      onClick={() => fileRef.current.click()}
-                      className="mt-2 text-xs font-medium text-[var(--primary)] underline hover:text-[var(--primary-hover)] cursor-pointer"
-                    >
-                      {t("profile.face_image.replace")}
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => fileRef.current.click()}
-                    className="flex items-center gap-2 px-4 py-2 border border-[var(--border-color)] rounded-xl text-xs font-bold uppercase tracking-wide hover:bg-[var(--bg-secondary)] transition shadow-sm active:scale-95 text-[var(--text-body)] cursor-pointer"
-                  >
-                    <Upload size={14} />
-                    {t("profile.face_image.upload")}
-                  </button>
-                )}
-              </div>
-              <div className="bg-[var(--bg-primary)] text-[var(--text-body)]/80 text-[10px] px-3 py-2 rounded-lg inline-block font-medium border border-[var(--border-color)]">
-                {t("profile.face_image.tips")}
-              </div>
-            </div>
+            <FaceLivenessEnrollment
+              studentId={data.id}
+              token={localStorage.getItem("token")}
+              onSuccess={() => queryClient.invalidateQueries(["myStudentProfile"])}
+            />
 
             {/* Card 3: Attendance Summary (Weighted) */}
             <div className="bg-[var(--bg-card)] rounded-2xl border border-[var(--border-color)] shadow-sm p-6 space-y-6">
@@ -620,6 +591,7 @@ export default function StudentProfile() {
     }
   }}
 />
+
              
           </div>
         )}

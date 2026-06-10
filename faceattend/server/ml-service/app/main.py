@@ -14,6 +14,7 @@ import structlog
 
 from app.core.config import settings
 from app.api.routes.face_recognition import router as ml_router
+from app.api.routes.face import router as face_router
 from app.core.security import verify_api_key
 from app.ml.face_detector import _check_model_exists
 
@@ -63,6 +64,14 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def enforce_api_key(request: Request, call_next):
+        # Exclude OPTIONS request (CORS preflight)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # Exclude health check and root endpoints
+        if request.url.path in ("/", "/health", "/docs", "/openapi.json"):
+            return await call_next(request)
+
         api_key = request.headers.get("X-API-Key")
         if not api_key:
             return JSONResponse(
@@ -99,6 +108,7 @@ def create_app() -> FastAPI:
 
     # Include routers
     app.include_router(ml_router)
+    app.include_router(face_router)
     app.include_router(health_router, tags=["Health"])
 
     return app
@@ -110,7 +120,7 @@ app = create_app()
 Instrumentator().instrument(app).expose(app)
 
 
-@app.get("/", tags=["Root"], dependencies=[Depends(verify_api_key)])
+@app.get("/", tags=["Root"])
 async def root():
     """Root endpoint"""
     return {

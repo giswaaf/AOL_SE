@@ -1,35 +1,82 @@
 # ============================================================
-# requirements.txt — ML Service (Gabungan 3 Repository)
+# requirements.txt — ML Service (Updated for ArcFace)
 # ============================================================
-# Letakkan di: server/ml-service/requirements.txt
-#
-# URUTAN INSTALASI PENTING:
-# 1. Install cmake & dlib prerequisites dulu (lihat README)
-# 2. pip install -r requirements.txt
+# PERUBAHAN: Menambah insightface + onnxruntime sebagai primary encoder.
+# dlib dan face_recognition TETAP ada sebagai fallback opsional.
 # ============================================================
 
-# ── Dari ageitgey/face_recognition ──────────────────────────
-face_recognition>=1.3.0
-dlib>=19.22.0
+# ── Primary face embedding: InsightFace ArcFace ─────────────
+insightface>=0.7.3
+onnxruntime>=1.16.0          # CPU inference; ganti dengan onnxruntime-gpu jika ada CUDA
 
-# ── Dari minivision-ai/Silent-Face-Anti-Spoofing ────────────
+# ── Fallback face embedding: DeepFace Facenet512 ────────────
+deepface>=0.0.79
+tf-keras>=2.16.0             # required by deepface with TF 2.16+
+
+# ── Anti-spoofing (tidak berubah) ───────────────────────────
 torch>=1.7.0
 torchvision>=0.8.0
 
-# ── Dari nem-web/smart-attendance (ML Service) ──────────────
+# ── Web framework (tidak berubah) ───────────────────────────
 fastapi>=0.115.5
 uvicorn[standard]>=0.32.1
 httpx>=0.27.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
 
-# ── Shared dependencies ─────────────────────────────────────
+# ── Computer vision (tidak berubah) ─────────────────────────
 opencv-python-headless>=4.5.0
 numpy>=1.21.0,<2.0.0
 Pillow>=8.0.0
 scikit-learn>=1.0.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
+mediapipe>=0.10.0
 
-# ── Opsional (untuk GPU acceleration) ───────────────────────
-# torch-cu117  # Uncomment jika ada NVIDIA GPU + CUDA 11.7
+# ── Legacy (opsional, bisa dihapus jika InsightFace OK) ─────
+# face_recognition>=1.3.0
+# dlib>=19.22.0
+
+# ── GPU acceleration (opsional) ─────────────────────────────
+# onnxruntime-gpu>=1.16.0    # ganti onnxruntime di atas jika ada NVIDIA GPU
+
+
+# ============================================================
+# MIGRATION GUIDE — Cara upgrade dari versi lama
+# ============================================================
+#
+# 1. Install dependencies baru:
+#    pip install insightface>=0.7.3 onnxruntime>=1.16.0 deepface>=0.0.79 -r requirements.txt
+#
+# 2. Pertama kali jalankan, InsightFace akan download model buffalo_l (~300MB).
+#    Pastikan koneksi internet tersedia saat startup pertama.
+#    Atau pre-download manual:
+#      python -c "from insightface.app import FaceAnalysis; FaceAnalysis('buffalo_l').prepare(ctx_id=0)"
+#
+# 3. ⚠️  WAJIB: Re-enroll semua mahasiswa!
+#    Embedding lama (9216-dim pixel flatten) TIDAK kompatibel dengan
+#    embedding baru (512-dim ArcFace). Jalankan script migrasi:
+#
+#      python scripts/migrate_clear_old_embeddings.py
+#
+#    Kemudian minta semua mahasiswa melakukan pendaftaran ulang via
+#    fitur "Pendaftaran Video" di halaman profil.
+#
+# 4. Copy file-file baru ke posisi yang tepat:
+#    server/ml-service/app/ml/face_encoder.py      (ganti yang lama)
+#    server/ml-service/app/ml/face_matcher.py      (ganti yang lama)
+#    server/ml-service/app/ml/attendance_pipeline.py (ganti yang lama)
+#    server/ml-service/app/api/routes/face.py      (ganti yang lama)
+#    faceattend/frontend/src/students/components/FaceLivenessEnrollment.jsx (BARU)
+#
+# 5. Update StudentProfile.jsx — tambahkan FaceLivenessEnrollment:
+#    import FaceLivenessEnrollment from "../components/FaceLivenessEnrollment";
+#
+#    Ganti card "Face Image Upload" yang lama dengan:
+#    <FaceLivenessEnrollment
+#      studentId={data.id}
+#      token={localStorage.getItem("token")}
+#      onSuccess={() => queryClient.invalidateQueries(["myStudentProfile"])}
+#    />
+#
+# ============================================================

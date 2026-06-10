@@ -246,6 +246,9 @@ async def handle_process_frame(sid, data):
         faces = ml_response.get("faces", [])
         count = len(faces)
 
+        dims = ml_response.get("metadata", {}).get("image_dimensions") or [826, 464]
+        frame_width, frame_height = dims[0], dims[1]
+
         await sio.emit(
             "processing_started",
             {"status": "processing", "matched": [], "pending": count},
@@ -299,19 +302,20 @@ async def handle_process_frame(sid, data):
         )
         students_list = await students_cursor.to_list(length=500)
 
-        candidate_embeddings = [
-            {
-                "student_id": str(s["userId"]),
-                "embeddings": s["face_embeddings"],
-            }
-            for s in students_list
-        ]
+        candidate_embeddings = []
+        for s in students_list:
+            valid_embs = [emb for emb in s.get("face_embeddings", []) if isinstance(emb, list) and len(emb) == 512]
+            if valid_embs:
+                candidate_embeddings.append({
+                    "student_id": str(s["userId"]),
+                    "embeddings": valid_embs,
+                })
 
         for i, face in enumerate(faces):
             match_resp = await ml_client.match_faces(
                 query_embedding=face["embedding"],
                 candidate_embeddings=candidate_embeddings,
-                threshold=ML_UNCERTAIN_THRESHOLD,
+                threshold=1.0 - ML_UNCERTAIN_THRESHOLD,
             )
 
             if not match_resp.get("success"):
@@ -348,7 +352,7 @@ async def handle_process_frame(sid, data):
                             "id": str(matched_student["userId"]),
                             "name": matched_student.get("name")
                             or (user_info.get("name") if user_info else "Unknown"),
-                            "roll": user_info.get("roll") if user_info else "",
+                            "roll": matched_student.get("roll") or "",
                         }
 
             is_live = face.get("is_live")
@@ -362,10 +366,10 @@ async def handle_process_frame(sid, data):
 
             result_item = {
                 "box": {
-                    "top": face["location"].get("top"),
-                    "right": face["location"].get("right"),
-                    "bottom": face["location"].get("bottom"),
-                    "left": face["location"].get("left"),
+                    "top": face["location"].get("top") / frame_height,
+                    "right": face["location"].get("right") / frame_width,
+                    "bottom": face["location"].get("bottom") / frame_height,
+                    "left": face["location"].get("left") / frame_width,
                 },
                 "status": status_str,
                 "distance": round(distance, 4) if best_student_id else None,

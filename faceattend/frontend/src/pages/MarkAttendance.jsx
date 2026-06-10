@@ -183,6 +183,7 @@ export default function MarkAttendance() {
 
     switch (mlStatus) {
       case "ready":
+      case "processing":
         return (
           <span className="px-2.5 py-0.5 bg-[var(--success)]/10 text-[var(--success)] text-xs font-bold uppercase rounded-full flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 bg-[var(--success)] rounded-full animate-pulse"></span>
@@ -195,13 +196,6 @@ export default function MarkAttendance() {
             <AlertTriangle size={10} />
             {t('mark_attendance.status.waking_up')}
           </span>
-        );
-      case "processing":
-        return (
-           <span className="px-2.5 py-0.5 bg-[var(--bg-secondary)] text-[var(--text-body)] text-xs font-bold uppercase rounded-full flex items-center gap-1.5">
-             <Loader2 size={10} className="animate-spin" />
-             {t('mark_attendance.status.processing') || "Processing"}
-           </span>
         );
       case "checking":
       default:
@@ -237,10 +231,35 @@ export default function MarkAttendance() {
     });
   }, [selectedSubject])
 
+  const [isScanning, setIsScanning] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
   const frameInFlightRef = useRef(false);
 
   useEffect(() => {
-    if (!selectedSubject || attendanceSubmitted) return;
+    if (!isScanning) {
+      setCameraError(null);
+    }
+  }, [isScanning]);
+
+  const toggleStudentStatus = (studentId) => {
+    if (attendanceSubmitted) return;
+    setAttendanceMap((prev) => {
+      if (!prev[studentId]) return prev;
+      const updated = { ...prev };
+      const s = { ...updated[studentId] };
+      s.status = s.status === "present" ? "absent" : "present";
+      s.count = s.status === "present" ? 3 : 0;
+      updated[studentId] = s;
+      return updated;
+    });
+  };
+
+  useEffect(() => {
+    if (!selectedSubject || attendanceSubmitted || !isScanning) {
+      setMlStatus("ready");
+      setDetections([]);
+      return;
+    }
 
     const mlSessionId = `mk-${Date.now()}`;
     const token = localStorage.getItem("token");
@@ -347,12 +366,12 @@ export default function MarkAttendance() {
       socket.off("ml_error", onMlError);
       socket.off("frame_skipped", onFrameSkipped);
     };
-  }, [selectedSubject, attendanceSubmitted]);
+  }, [selectedSubject, attendanceSubmitted, isScanning]);
 
-  const presentStudents = Object.values(attendanceMap)
-    .filter((s) => s.status === "present")
-    .map((s) => ({
-      studentId: Object.keys(attendanceMap).find(key => attendanceMap[key] === s),
+  const presentStudents = Object.entries(attendanceMap)
+    .filter(([, s]) => s.status === "present")
+    .map(([id, s]) => ({
+      studentId: id,
       name: s.name,
       roll: s.roll,
     }));
@@ -402,7 +421,7 @@ export default function MarkAttendance() {
     }
 
     try {
-      await api.post("/api/attendance/confirm", {
+      await api.post("/attendance/confirm", {
         subject_id: selectedSubject,
         date: selectedDate,
         present_students: presentStudents.map((s) => s.studentId),
@@ -513,29 +532,91 @@ export default function MarkAttendance() {
                </div>
             </div>
           )}
-          
-          {/* LEFT: CAMERA FEED (8 cols) */}
           <div className="lg:col-span-8 space-y-3">
-            <div className="flex justify-between items-center px-1">
-              <h3 className="font-semibold text-[var(--text-main)]">{t('mark_attendance.camera_feed')}</h3>
-              {getStatusBadge()}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-1">
+              <div>
+                <h3 className="font-semibold text-[var(--text-main)]">{t('mark_attendance.camera_feed')}</h3>
+                {isScanning && selectedSubject && (
+                  <p className="text-xs text-[var(--text-body)] flex items-center gap-1.5 mt-0.5">
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                    Camera scanner active •{" "}
+                    <span className="font-semibold text-[var(--primary)]">
+                      {students.length > 0 ? Math.round((presentStudents.length / students.length) * 100) : 0}% Present
+                    </span>{" "}
+                    ({presentStudents.length}/{students.length})
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {getStatusBadge()}
+              </div>
             </div>
 
             <div className="relative bg-black rounded-2xl overflow-hidden aspect-video shadow-sm group">
-              {/* Webcam Component */}
-              <Webcam
-                audio={false}
-                ref={webcamRef}
-                screenshotFormat="image/jpeg"
-                videoConstraints={videoConstraints}
-                width={1280}
-                height={720}
-                mirrored={true}
-                className="w-full h-full object-contain"
-              />
-
-              {/* REAL FACE OVERLAY */}
-              <FaceOverlay faces={detections} videoRef={webcamRef} mirrored={false} />
+              {/* Camera Error Overlay */}
+              {cameraError ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-[var(--bg-secondary)] z-20 p-6 text-center animate-in fade-in">
+                  <div className="max-w-md space-y-4">
+                    <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto text-red-600">
+                      <AlertCircle size={32} />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-lg font-bold text-red-600">Gagal Mengakses Kamera</h4>
+                      <p className="text-xs text-[var(--text-body)]">{cameraError}</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setCameraError(null);
+                        setIsScanning(false);
+                      }}
+                      className="px-6 py-2.5 bg-[var(--primary)] text-[var(--text-on-primary)] rounded-xl font-bold shadow-md hover:bg-[var(--primary-hover)] transition cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                  </div>
+                </div>
+              ) : selectedSubject && isScanning ? (
+                <>
+                  <Webcam
+                    audio={false}
+                    ref={webcamRef}
+                    screenshotFormat="image/jpeg"
+                    videoConstraints={videoConstraints}
+                    width={1280}
+                    height={720}
+                    mirrored={true}
+                    className="w-full h-full object-contain"
+                    onUserMediaError={(err) => {
+                      console.error("Webcam error:", err);
+                      if (!window.isSecureContext) {
+                        setCameraError("Kamera tidak dapat diakses karena koneksi tidak aman (harus HTTPS atau localhost).");
+                      } else {
+                        setCameraError("Tidak dapat mengakses kamera. Pastikan izin kamera diberikan.");
+                      }
+                    }}
+                  />
+                  {/* REAL FACE OVERLAY */}
+                  <FaceOverlay faces={detections} videoRef={webcamRef} mirrored={true} />
+                </>
+              ) : selectedSubject ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-[var(--bg-secondary)] z-10 p-6 text-center animate-in fade-in">
+                  <div className="max-w-md space-y-4">
+                    <div className="w-16 h-16 bg-[var(--primary)]/10 rounded-full flex items-center justify-center mx-auto text-[var(--primary)]">
+                      <Radio size={32} className="animate-pulse" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-lg font-bold text-[var(--text-main)]">Face Scanner Inactive</h4>
+                      <p className="text-xs text-[var(--text-body)]">Ready to mark attendance. Position the camera towards the classroom and click below to start recognizing faces.</p>
+                    </div>
+                    <button
+                      onClick={() => setIsScanning(true)}
+                      className="px-6 py-2.5 bg-[var(--primary)] text-[var(--text-on-primary)] rounded-xl font-bold shadow-md hover:bg-[var(--primary-hover)] transition cursor-pointer"
+                    >
+                      Start Face Scanner
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {/* Overlay for "Select Subject" */}
               {!selectedSubject && (
@@ -543,29 +624,39 @@ export default function MarkAttendance() {
                   <div className="bg-[var(--bg-card)]/80 p-6 rounded-2xl flex flex-col items-center gap-2 border border-[var(--border-color)]">
                      <AlertCircle size={32} className="text-[var(--text-body)]" />
                      <p className="font-bold text-[var(--text-main)]">Select a subject first</p>
-                     <p className="text-xs text-[var(--text-body)]">Face recognition will start automatically</p>
+                     <p className="text-xs text-[var(--text-body)]">Then click Start Face Scanner to begin scanning</p>
                   </div>
                 </div>
               )}
 
               {/* Bottom Camera Controls */}
-              <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/60 to-transparent flex justify-between items-end">
-                <div className="text-white/80 text-xs font-medium">
-                  {selectedSubject ? (
+              {selectedSubject && (
+                <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/60 to-transparent flex justify-between items-end z-20">
+                  <div className="text-white/80 text-xs font-medium">
+                    {isScanning ? (
                       <>
                         <p className="flex items-center gap-1.5"><Radio size={12} className="text-green-400 animate-pulse" /> Recognition Active</p>
                         <p className="opacity-70 mt-0.5">Liveness Check Enabled</p>
                       </>
-                  ) : (
-                      <p className="opacity-50">Waiting for subject selection...</p>
-                  )}
+                    ) : (
+                      <p className="opacity-50">Scanner Paused</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3">
+                     {isScanning && (
+                       <button
+                         onClick={() => setIsScanning(false)}
+                         className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition shadow-md cursor-pointer"
+                       >
+                         Pause Scanner
+                       </button>
+                     )}
+                     <button className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition backdrop-blur-md">
+                       <Grid size={20} />
+                     </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
-                   <button className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition backdrop-blur-md">
-                     <Grid size={20} />
-                   </button>
-                </div>
-              </div>
+              )}
             </div>
           </div>
 
@@ -612,7 +703,9 @@ export default function MarkAttendance() {
                 presentStudents.map((s) => (
                   <div
                     key={s.studentId}
-                    className="p-3 rounded-xl bg-[var(--success)]/10 border border-[var(--success)]/25 flex items-center justify-between"
+                    onClick={() => toggleStudentStatus(s.studentId)}
+                    className="p-3 rounded-xl bg-[var(--success)]/10 border border-[var(--success)]/25 flex items-center justify-between cursor-pointer hover:bg-[var(--success)]/20 transition-all group"
+                    title="Click to toggle status"
                   >
                     <div>
                       <h4 className="text-sm font-bold text-[var(--text-main)]">{s.name}</h4>
@@ -628,7 +721,13 @@ export default function MarkAttendance() {
                 Object.entries(attendanceMap).map(([id, s]) => (
                   <div
                     key={id}
-                    className="p-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-color)] flex items-center justify-between"
+                    onClick={() => toggleStudentStatus(id)}
+                    className={`p-3 rounded-xl border flex items-center justify-between cursor-pointer transition-all hover:opacity-90 ${
+                      s.status === "present"
+                        ? "bg-[var(--success)]/10 border-[var(--success)]/25 hover:bg-[var(--success)]/20"
+                        : "bg-[var(--bg-card)] border-[var(--border-color)] hover:bg-[var(--bg-secondary)]"
+                    }`}
+                    title="Click to toggle status"
                   >
                     <div>
                       <h4 className="text-sm font-semibold text-[var(--text-main)]">{s.name}</h4>

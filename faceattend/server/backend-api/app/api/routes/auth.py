@@ -224,7 +224,7 @@ async def login(request: Request, response: Response, payload: LoginRequest):
 
     update_trusted_device = False
 
-    # 5. DEVICE BINDING WITH 1-HOUR COOLDOWN CHECK - ONLY FOR STUDENTS
+    # 5. DEVICE BINDING WITH 5-HOUR COOLDOWN CHECK - ONLY FOR STUDENTS
     if user["role"] == "student":
         trusted_device_id = user.get("trusted_device_id")
 
@@ -233,7 +233,7 @@ async def login(request: Request, response: Response, payload: LoginRequest):
             update_trusted_device = True
 
         elif trusted_device_id != device_id:
-            # Condition 3: Mismatch! Check the 1-hour cooldown
+            # Condition 3: Mismatch! Check the 5-hour cooldown
             last_logout_time = user.get("last_logout_time")
 
             if last_logout_time:
@@ -243,8 +243,8 @@ async def login(request: Request, response: Response, payload: LoginRequest):
 
                 time_since_logout = datetime.now(timezone.utc) - last_logout_time
 
-                # If they logged out less than 1 hour ago -> Trigger OTP Modal
-                if time_since_logout < timedelta(hours=1):
+                # If they logged out less than 5 hours ago -> Trigger OTP Modal
+                if time_since_logout < timedelta(hours=5):
                     # We pass the newly generated/provided device_id in the error detail
                     # so the frontend knows which device ID to request the OTP for.
                     raise HTTPException(
@@ -255,7 +255,7 @@ async def login(request: Request, response: Response, payload: LoginRequest):
                         },
                     )
 
-            # If we get here: They logged out > 1 hour ago or never logged out.
+            # If we get here: They logged out > 5 hours ago or never logged out.
             # Bypass OTP and mark the new device to be updated.
             update_trusted_device = True
 
