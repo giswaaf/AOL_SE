@@ -18,6 +18,13 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download models saat build
+RUN mkdir -p /app/app/ml && \
+    curl -L "https://storage.googleapis.com/mediapipe-assets/blaze_face_short_range.tflite" \
+    -o /app/app/ml/blaze_face_short_range.tflite && \
+    curl -L "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" \
+    -o /app/app/ml/face_landmarker.task
+
 COPY . .
 
 # Make entrypoint script executable
